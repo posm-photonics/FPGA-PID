@@ -1,7 +1,6 @@
 # 00 Project Brief
 
 **Project:** POSM FPGA Laser-Lock Core
-**Version:** 2
 
 ---
 
