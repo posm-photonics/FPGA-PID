@@ -1,3 +1,0 @@
-register_bank_simple.sv
-register_defs_pkg.sv
-csr_bridge_stub.sv

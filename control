@@ -1,4 +1,0 @@
-ramp_scan.sv
-lock_fsm.sv
-mode_mux.sv
-safety_interlock.sv
