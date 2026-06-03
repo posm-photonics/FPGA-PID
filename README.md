@@ -32,7 +32,7 @@ xvlog --sv rtl/common/sat_math.sv sim/tb_common/tb_sat_math.sv
 xelab tb_sat_math --snapshot tb_sat_math_snap
 xsim tb_sat_math_snap --runall
 Waveforms are written to `outputs/waveforms/`. CSV outputs go to `outputs/csv/`. Use the Python scripts in `sim/tb_system/` to generate plots from CSV data.
-
+```
 ---
 ## Fixed-Point Conventions
 
@@ -82,4 +82,3 @@ Full reading list in `docs/08_reading_list.md`.
 ## License
 
 Apache 2.0 — see `LICENSE` for details.
-
