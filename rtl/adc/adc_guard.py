@@ -49,6 +49,8 @@ class ADCGuard(Elaboratable):
     def elaborate(self, platform):
         m = Module()
 
+        m.domains.sync = ClockDomain() #Important for simulation and clock settings
+
         ch0_unchanged = Signal()
         ch1_unchanged = Signal()
 

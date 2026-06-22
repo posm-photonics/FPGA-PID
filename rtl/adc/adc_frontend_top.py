@@ -33,6 +33,8 @@ class ADCFrontendTop(Elaboratable):
     def elaborate(self, platform):
         m = Module()
 
+        m.domains.sync = ClockDomain() #Important for simulation and clock settings
+
         # Submodules
         m.submodules.fmt = fmt = ADCFormatter(self.width)
         m.submodules.gd = gd = ADCGuard(self.width + 1)

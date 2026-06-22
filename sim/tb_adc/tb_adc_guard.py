@@ -1,5 +1,6 @@
 from amaranth import *
 from amaranth.sim import Simulator
+from amaranth.sim import Tick
 from rtl.adc.adc_guard import ADCGuard
 
 def test_adc_guard():
@@ -8,49 +9,50 @@ def test_adc_guard():
     sim = Simulator(m)
     sim.add_clock(1e-6)
 
-    def process():
+    async def process(ctx):
         # NORMAL OPERATION
         for i in range(5):
-            yield m.i_valid.eq(1)
-            yield m.i_ch0.eq(i)
-            yield m.i_ch1.eq(i + 1)
-            yield m.i_overrange_ch0.eq(0)
-            yield m.i_overrange_ch1.eq(0)
-            yield
-            yield
+            ctx.set(m.i_valid, 1)
+            ctx.set(m.i_ch0, i)
+            ctx.set(m.i_ch1, i + 1)
+            ctx.set(m.i_overrange_ch0, 0)
+            ctx.set(m.i_overrange_ch1, 0)
 
-            faults = yield m.o_fault_flags
+            await ctx.tick()
+            await ctx.tick()
+
+            faults = ctx.get(m.o_fault_flags)
             assert faults == 0
 
     
         # STUCK-AT DETECTION
         for i in range(10):
-            yield m.i_valid.eq(1)
-            yield m.i_ch0.eq(100)  # stuck
-            yield m.i_ch1.eq(200)
-            yield
-            yield
+            ctx.set(m.i_valid, 1)
+            ctx.set(m.i_ch0, 100)  # stuck
+            ctx.set(m.i_ch1, 200)
+            
+            await ctx.tick()
+            await ctx.tick()
 
-        faults = yield m.o_fault_flags
+        faults = ctx.get(m.o_fault_flags)
         assert (faults & (1 << 2)) != 0, "stuck CH0 not detected"
 
         # OVER-RANGE
-        yield m.i_overrange_ch1.eq(1)
-        yield
-        yield
+        ctx.set(m.i_overrange_ch1,1)
+        await ctx.tick()
+        await ctx.tick()
 
-        faults = yield m.o_fault_flags
+        faults = ctx.get(m.o_fault_flags)
         assert (faults & (1 << 1)) != 0
 
         
         # MISSING VALID
-        yield m.i_valid.eq(0)
-        yield
-        yield
+        ctx.set(m.i_valid,0)
+        await ctx.tick()
+        await ctx.tick()
 
-        faults = yield m.o_fault_flags
-        assert (faults & (1 << 4)) != 0
-
-    sim.add_sync_process(process)
+        faults = ctx.get(m.o_fault_flags)
+        assert (faults & (1 << 4)) != 0   
+    sim.add_testbench(process) # process has to run synchronized to clock edges
     with sim.write_vcd("adc_guard.vcd"):
         sim.run()

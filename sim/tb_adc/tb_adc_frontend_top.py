@@ -1,5 +1,6 @@
 from amaranth import *
 from amaranth.sim import Simulator
+from amaranth.sim import Tick
 from rtl.adc.adc_frontend_top import ADCFrontendTop
 
 def test_adc_frontend_top():
@@ -8,29 +9,30 @@ def test_adc_frontend_top():
     sim = Simulator(m)
     sim.add_clock(1e-6)
 
-    def process():
+    async def process(ctx):
         # NORMAL STREAMING
         for i in range(20):
-            yield m.i_format_mode.eq(1)
-            yield m.i_ch0.eq(i)
-            yield m.i_ch1.eq(i + 10)
-            yield m.i_valid.eq(1)
-            yield m.i_overrange_ch0.eq(0)
-            yield m.i_overrange_ch1.eq(0)
+            ctx.set(m.i_format_mode, 1)
+            ctx.set(m.i_ch0, i)
+            ctx.set(m.i_ch1, i + 10)
+            ctx.set(m.i_valid, 1)
+            ctx.set(m.i_overrange_ch0, 0)
+            ctx.set(m.i_overrange_ch1, 0)
 
-            yield
-            yield
+            await ctx.tick()
+            await ctx.tick()
 
-            assert (yield m.o_valid) == 1
+            o_valid = ctx.get(m.o_valid)
+            assert o_valid == 1
 
         # FAULT INJECTION
-        yield m.i_overrange_ch0.eq(1)
-        yield
-        yield
+        ctx.set(m.i_overrange_ch0,1)
+        await ctx.tick()
+        await ctx.tick()
 
-        faults = yield m.o_fault_flags
+        faults = ctx.get(m.o_fault_flags)
         assert faults != 0, "frontend failed to propagate guard fault"
 
-    sim.add_sync_process(process)
+    sim.add_testbench(process) # process has to run synchronized to clock edges
     with sim.write_vcd("adc_frontend_top.vcd"):
         sim.run()
