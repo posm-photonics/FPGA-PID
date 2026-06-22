@@ -10,6 +10,8 @@ class ADCGuard(Elaboratable):
 
     def __init__(self, width=17, guard_count_threshold=16):
         self.width = width
+
+        #How many bad samples in a row before we say the ADC is broken?
         self.guard_count_threshold = guard_count_threshold
 
         # Inputs
@@ -25,10 +27,20 @@ class ADCGuard(Elaboratable):
         self.o_ch1_valid = Signal()
         self.o_valid = Signal()
 
+
         self.o_fault_flags = Signal(5)  # bitfield
+        # bit 0 -> ch0 overrange
+        # bit 1 -> ch1 overrange
+        # bit 2 -> ch0 stuck
+        # bit 3 -> ch1 stuck
+        # bit 4 -> missing valid
+
 
         # Internal state
-        self._stuck_counter_ch0 = Signal(8)
+
+        # How long has this channel been unchanged? Frozen ADC?
+        # Count up to 255 cycles
+        self._stuck_counter_ch0 = Signal(8) 
         self._stuck_counter_ch1 = Signal(8)
 
         self._last_ch0 = Signal(signed(width))
@@ -63,18 +75,21 @@ class ADCGuard(Elaboratable):
         # Stuck detection (simple persistence counter)
         with m.If(self.i_valid):
             with m.If(ch0_unchanged):
-                m.d.sync += self._stuck_counter_ch0.eq(
-                    self._stuck_counter_ch0 + 1
+                m.d.sync += self._stuck_counter_ch0.eq( 
+                    self._stuck_counter_ch0 + 1 #stuck this cycle too,
+                                                # suspicions increase
                 )
             with m.Else():
-                m.d.sync += self._stuck_counter_ch0.eq(0)
-
+                m.d.sync += self._stuck_counter_ch0.eq(0) #not stuck this cycle, 
+                                                    #suspicions are back to 0
             with m.If(ch1_unchanged):
                 m.d.sync += self._stuck_counter_ch1.eq(
-                    self._stuck_counter_ch1 + 1
+                    self._stuck_counter_ch1 + 1 #stuck this cycle too,
+                                                # suspicions increase
                 )
             with m.Else():
-                m.d.sync += self._stuck_counter_ch1.eq(0)
+                m.d.sync += self._stuck_counter_ch1.eq(0) #not stuck this cycle, 
+                                                    #suspicions are back to 0
 
             m.d.sync += [
                 self._last_ch0.eq(self.i_ch0),

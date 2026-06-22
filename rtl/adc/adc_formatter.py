@@ -13,33 +13,33 @@ class ADCFormatter(Elaboratable):
         self.width = width
 
         # Inputs
-        self.i_ch0 = Signal(width)
+        self.i_ch0 = Signal(width) # same as i_ch0[15:0]
         self.i_ch1 = Signal(width)
         self.i_valid = Signal()
 
-        self.i_format_mode = Signal()  # 0=offset binary, 1=two's complement
+        self.i_format_mode = Signal() # 0=offset binary, 1=two's complement
 
         # Outputs
-        self.o_ch0 = Signal(signed(width + 1))
+        self.o_ch0 = Signal(signed(width + 1)) #Use N+1 for negative numbers
         self.o_ch1 = Signal(signed(width + 1))
         self.o_valid = Signal()
 
     def elaborate(self, platform):
         m = Module()
 
-        msb_mask = 1 << (self.width - 1)
+        msb_mask = 1 << (self.width - 1) # msb_mask = 2^(N-1) = 2^15
 
-        # Offset binary -> signed conversion:
-        # subtract midpoint (MSB flip)
+        # Offset binary -> 2's complement:
         def decode(raw):
             # Convert to integer domain first
-            # Amaranth bitwise XOR works directly on Signals
-            return (raw ^ msb_mask)
+            # 2's complement = OffsetValue - 2^(N-1)
+            return raw - msb_mask
 
         with m.If(self.i_format_mode == 0):
             # offset binary mode
             m.d.comb += [
-                self.o_ch0.eq(decode(self.i_ch0)),
+                self.o_ch0.eq(decode(self.i_ch0)), #same as 
+                                                   #assign o_ch0 = denote(i_ch0)
                 self.o_ch1.eq(decode(self.i_ch1)),
             ]
         with m.Else():

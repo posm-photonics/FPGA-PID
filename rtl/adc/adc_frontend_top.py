@@ -1,4 +1,6 @@
 from amaranth import *
+from rtl.adc.adc_formatter import ADCFormatter
+from rtl.adc.adc_guard import ADCGuard
 
 class ADCFrontendTop(Elaboratable):
     """
