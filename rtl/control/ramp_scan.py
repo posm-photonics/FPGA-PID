@@ -51,7 +51,7 @@ class RampScan(Elaboratable):
 
         # --- input ports ---
         self.enable        = Signal()
-        self.zoom_mode     = Signal()
+        self.zoom_mode     = Signal() # zoom_mode = 1 → use zoom bounds instead of full scan
 
         # wide scan bounds
         self.ramp_min      = Signal(signed(dac_w))
@@ -105,11 +105,14 @@ class RampScan(Elaboratable):
         active_max = Signal(signed(dac_w))
 
         with m.If(self.zoom_mode):
+            # Zoom Bounds mode
             m.d.comb += [
+                # truncate back to DAC width
                 active_min.eq(zoom_lo[:dac_w]),
                 active_max.eq(zoom_hi[:dac_w]),
             ]
         with m.Else():
+            # Full scan mode
             m.d.comb += [
                 active_min.eq(self.ramp_min),
                 active_max.eq(self.ramp_max),
@@ -126,15 +129,18 @@ class RampScan(Elaboratable):
             # advance every cycle
             m.d.comb += tick.eq(self.enable)
         with m.Else():
+            # only advance when counter hits zero
             m.d.comb += tick.eq(
                 self.enable & (tick_counter == 0)
             )
             with m.If(self.enable):
                 with m.If(tick_counter == 0):
+                    # reload counter
                     m.d.sync += tick_counter.eq(
                         self.ramp_tick_div - 1
                     )
                 with m.Else():
+                    # count down every cycle
                     m.d.sync += tick_counter.eq(
                         tick_counter - 1
                     )
@@ -166,7 +172,7 @@ class RampScan(Elaboratable):
                 self.at_max.eq(0),
             ]
 
-        with m.Elif(tick):
+        with m.Elif(tick): # Only update ramp on tick event.
             with m.If(direction_up):
                 # going up
                 with m.If(ramp_up_next >= active_max.as_signed()):
