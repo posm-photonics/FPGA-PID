@@ -26,6 +26,8 @@
 #   real_gain = register_value / 2^14
 #   example: Kp=0.5 -> store 8192
 #
+# N.B: Q3.14 is a fixed-point number format used to represent floating points.
+#
 # PICore latency: 2 clock cycles (unchanged)
 # RelayTuner latency: Category B, not on fast path
  
@@ -67,6 +69,41 @@ class PICore(Elaboratable):
     control_valid    : output, 1 bit
     sat_hi           : output, 1 bit
     sat_lo           : output, 1 bit
+    """
+    """
+    Flow of the PI controler
+    
+
+                    New error sample?
+                       │
+             No ───────┴──────► Do nothing
+                       │
+                      Yes
+                       │
+              Controller enabled?
+                  │          │
+                 No         Yes
+                  │          │
+      Output safe value   Hold enabled?
+                  │          │
+                  │     Yes ─┴──► Keep previous output,
+                  │               don't update integrator
+                  │
+                  ▼
+               No hold
+                  │
+        Windup suppression active?
+             │              │
+            Yes            No
+             │              │
+     Don't update I     I = I + Ki·e
+                  │
+                  ▼
+         Compute PI output
+                  │
+      Above max? ─► Clamp to max
+      Below min? ─► Clamp to min
+      Otherwise ──► Output candidate
     """
  
     def __init__(self, err_w=20, out_w=16,
@@ -121,34 +158,44 @@ class PICore(Elaboratable):
         m.d.comb += [
             out_max_ext.eq(self.out_max),
             out_min_ext.eq(self.out_min),
- 
+
+            # ( Kp * e[n] )
             p_term.eq(self.error_in * self.kp),
+
+            # ( Ki * e[n] )
             i_term.eq(self.error_in * self.ki),
- 
+
+            # scale it back to recover the proprer bits
             p_scaled.eq(p_term >> self.gain_frac),
             i_scaled.eq(i_term >> self.gain_frac),
- 
+
+            # I[n+1] = I[n] + ( Ki * e[n] )
             int_next.eq(integrator + i_scaled),
- 
+
+            # u[n] = ( Kp * e[n] ) + I[n]
             candidate.eq(p_scaled + integrator),
  
             sat_hi_comb.eq(candidate > out_max_ext),
             sat_lo_comb.eq(candidate < out_min_ext),
- 
+
+            # windup_suppress = Should I stop integrating right now?
+            # Only blocks it if it wants to increase in the same direction
+            # it is at its limit. If it is going in the opposite direction
+            # let it be.
             windup_suppress.eq(
                 (sat_hi_comb & (i_scaled > 0)) |
                 (sat_lo_comb & (i_scaled < 0))
             ),
         ]
  
-        with m.If(self.integrator_reset):
+        with m.If(self.integrator_reset): # useful during fault, relock, startup
             m.d.sync += integrator.eq(0)
  
         with m.Elif(self.integrator_load):
             m.d.sync += integrator.eq(self.load_value)
  
         with m.Elif(self.error_valid & self.lock_enable & ~self.hold_enable):
-            with m.If(~windup_suppress):
+            with m.If(~windup_suppress): # Only integrate if windup_suppress = 0
                 m.d.sync += integrator.eq(int_next)
  
         m.d.sync += self.control_valid.eq(0)
@@ -156,6 +203,9 @@ class PICore(Elaboratable):
         with m.If(self.error_valid & self.lock_enable):
  
             with m.If(self.hold_enable):
+                # The previous output remains stored.
+                # So the DAC keeps receiving the previous value.
+                # The controller is effectively frozen.
                 m.d.sync += self.control_valid.eq(1)
  
             with m.Else():
@@ -175,12 +225,17 @@ class PICore(Elaboratable):
                     ]
                 with m.Else():
                     m.d.sync += [
+                        # take only the lower out_w bits of candidate
+                        # because DAC only accepts 16 bits
                         self.control_out.eq(candidate[:self.out_w]),
+
                         self.sat_hi.eq(0),
                         self.sat_lo.eq(0),
                     ]
  
         with m.Elif(~self.lock_enable):
+            # If the controller isn't enabled,
+            # don't run PI control.
             m.d.sync += [
                 self.control_out.eq(self.out_safe),
                 self.sat_hi.eq(0),
@@ -227,9 +282,9 @@ class RelayTuner(Elaboratable):
  
     Ports
     -----
-    error_in    : signed input,  err_w bits  (same error fed to PICore)
+    error_in    : signed input, err_w bits  (same error fed to PICore)
     error_valid : input, 1 bit
-    tune_enable : input, 1 bit   (enable continuous background tuning)
+    tune_enable : input, 1 bit (enable continuous background tuning)
     relay_out   : signed output, relay_w bits  -> route to DAC_SLOW
     hold_request: output, 1 bit  -> wire to PICore.hold_enable
     kp_out      : signed output, gain_w bits  -> wire to PICore.kp
@@ -290,16 +345,6 @@ class RelayTuner(Elaboratable):
             self.kp_out.eq(kp_reg),
             self.ki_out.eq(ki_reg),
         ]
- 
-        # ---------------------------------------------------------------
-        # Relay state machine
-        #
-        # States:
-        #   IDLE    : waiting for tune_enable, outputting relay_out = 0
-        #   RELAY_P : relay output = +relay_amp, watching for zero crossing
-        #   RELAY_N : relay output = -relay_amp, watching for zero crossing
-        #   COMPUTE : one-cycle gain calculation after enough half-periods
-        # ---------------------------------------------------------------
  
         # relay output register
         relay_reg = Signal(signed(self.relay_w))
@@ -528,6 +573,14 @@ class RelayTuner(Elaboratable):
  
         # ---------------------------------------------------------------
         # State machine
+        # ---------------------------------------------------------------
+        # Relay state machine
+        #
+        # States:
+        #   IDLE    : waiting for tune_enable, outputting relay_out = 0
+        #   RELAY_P : relay output = +relay_amp, watching for zero crossing
+        #   RELAY_N : relay output = -relay_amp, watching for zero crossing
+        #   COMPUTE : one-cycle gain calculation after enough half-periods
         # ---------------------------------------------------------------
         with m.FSM(reset="IDLE"):
  
