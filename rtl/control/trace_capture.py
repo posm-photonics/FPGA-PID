@@ -37,16 +37,18 @@ register_bank.py behaves and avoids needing a second, separate
 address-decode layer for a first cut.
 """
 
-from amaranth import Module, Signal, Elaboratable, Cat, Mux
+from amaranth import Module, Signal, Elaboratable, Cat, Mux, signed
 from amaranth.hdl.mem import Memory
+import sys
+import os
 
-from .register_defs import (
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+from rtl.bus.register_defs import (
     ADDR_TRACE_CONFIG, ADDR_TRACE_START, ADDR_TRACE_LENGTH,
     ADDR_TRACE_DECIM, ADDR_TRACE_STATUS, ADDR_TRACE_WRITE_PTR,
     ADDR_TRACE_READ_ADDR, ADDR_TRACE_READ_DATA_X, ADDR_TRACE_READ_DATA_Y,
-    TRACE_CFG_ENABLE, TRACE_CFG_CHANNEL_SEL,
-    TRACE_STAT_BUSY, TRACE_STAT_READY, TRACE_STAT_OVERFLOW,
-    DAC_W, ERR_W,
+    TRACE_CFG_ENABLE, TRACE_CFG_CHANNEL_SEL, TRACE_STAT_BUSY, TRACE_STAT_READY,
+    TRACE_STAT_OVERFLOW, DAC_W, ERR_W,
 )
 
 
@@ -65,7 +67,7 @@ class TraceCapture(Elaboratable):
     err_w : int
         Width of the corrected error (Y) sample, signed.
     """
-
+    
     def __init__(self, depth=4096, dac_w=DAC_W, err_w=ERR_W):
         assert depth & (depth - 1) == 0, "depth must be a power of two"
         self.depth = depth
