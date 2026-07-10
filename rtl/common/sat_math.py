@@ -188,19 +188,19 @@ class SatMath(Elaboratable):
         # Combinational saturation logic
         # -------------------------------------------------------
         with m.If(self.value_in > max_val):
-            m.d.comb += [
+            m.d.sync += [
                 self.value_out.eq(max_val),
                 self.sat_hi.eq(1),
                 self.sat_lo.eq(0),
             ]
         with m.Elif(self.value_in < min_val):
-            m.d.comb += [
+            m.d.sync += [
                 self.value_out.eq(min_val),
                 self.sat_hi.eq(0),
                 self.sat_lo.eq(1),
             ]
         with m.Else():
-            m.d.comb += [
+            m.d.sync += [
                 self.value_out.eq(self.value_in[:self.out_w]),
                 self.sat_hi.eq(0),
                 self.sat_lo.eq(0),
