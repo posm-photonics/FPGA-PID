@@ -8,9 +8,10 @@
 #
 # Run with: python sim/tb_sat_math.py
 
-import os
 import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+import os
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from amaranth import *
 from amaranth.sim import *

@@ -60,8 +60,11 @@ selected otherwise.
 """
 
 from amaranth import Module, Signal, Elaboratable, Mux, signed
+import sys
+import os
 
-from .register_defs import (
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+from rtl.bus.register_defs import (
     ADDR_SLOW_CTRL_CONFIG, ADDR_SLOW_BIAS, ADDR_SLOW_KI,
     ADDR_SLOW_RECENTER_TARGET, ADDR_SLOW_RECENTER_GAIN,
     ADDR_SLOW_OUT_MIN, ADDR_SLOW_OUT_MAX, ADDR_SLOW_OUT_SAFE,

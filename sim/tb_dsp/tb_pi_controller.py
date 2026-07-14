@@ -38,9 +38,11 @@
  
 import math
 from amaranth.sim import Simulator, Tick
- 
-# import the DUT
-from pi_controller import PICore, RelayTuner, PIWithAutoTune
+import sys
+import os
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+from rtl.dsp.pi_controller import PICore, RelayTuner, PIWithAutoTune
  
 # ---------------------------------------------------------------------------
 # Shared constants

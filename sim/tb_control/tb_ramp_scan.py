@@ -15,10 +15,12 @@
 #   11. Reset to min on disable
 #   12. Step larger than range clamps correctly
 
-import os
 import csv
 import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+import os
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
 
 from amaranth import *
 from amaranth.sim import *
