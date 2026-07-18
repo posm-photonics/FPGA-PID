@@ -1136,7 +1136,7 @@ def test_tc33_closed_loop():
     After tuning, PI should reduce |e| significantly.
     """
     dut = PIWithAutoTune(
-        relay_amp=3000,
+        relay_amp=3300,
         min_half_periods=2,
         ema_shift=2,          # faster convergence for sim
         kp_init=0,
