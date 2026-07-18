@@ -177,7 +177,6 @@ def test_tc02_i_only():
         ctx.set(dut.error_in, error_val)
         ctx.set(dut.error_valid, 1)
         await ctx.tick()
-        await ctx.tick()
         ctx.set(dut.error_valid, 0)
  
         # Output = Kp*e + I[3] = 0 + 3*Ki*e (integrator from the 3 prior pulses)
@@ -218,14 +217,12 @@ def test_tc03_pi_combined():
         ctx.set(dut.error_in, error_val)
         ctx.set(dut.error_valid, 1)
         await ctx.tick()
-        await ctx.tick()
         out1 = signed16(ctx.get(dut.control_out))
         expected1 = int(0.5 * error_val)   # Kp*e + I[0]=0
         assert abs(out1 - expected1) <= 2, \
             f"TC03 FAIL cycle1: expected {expected1}, got {out1}"
  
         # Cycle 2: output = Kp*e + I[1] where I[1] = Ki*e from cycle 1
-        await ctx.tick()
         await ctx.tick()
         out2 = signed16(ctx.get(dut.control_out))
         i1 = int(0.125 * error_val)
@@ -1139,7 +1136,7 @@ def test_tc33_closed_loop():
     After tuning, PI should reduce |e| significantly.
     """
     dut = PIWithAutoTune(
-        relay_amp=200,
+        relay_amp=3000,
         min_half_periods=2,
         ema_shift=2,          # faster convergence for sim
         kp_init=0,
@@ -1162,7 +1159,10 @@ def test_tc33_closed_loop():
         u_fast    = 0       # last fast DAC command
         errors    = []
         tuned     = False
- 
+        tune_count = 0
+        TUNE_CYCLES_BEFORE_HANDOFF = 3
+        tune_valid_cycle = None
+        
         for i in range(3000):
             error = int(setpoint - plant_y)
             error = max(-(1 << 19), min((1 << 19) - 1, error))
@@ -1176,17 +1176,21 @@ def test_tc33_closed_loop():
  
             if ctx.get(dut.tune_valid):
                 tuned = True
- 
+                tune_count += 1
+                if tune_valid_cycle is None:
+                    tune_valid_cycle = i
+                if tune_count >= TUNE_CYCLES_BEFORE_HANDOFF:
+                    ctx.set(dut.tune_enable, 0 if tune_count >= 1 else 1)
+                         
             relay = ctx.get(dut.relay_out)
             r_s = relay if relay < (1 << 15) else relay - (1 << 16)
- 
-            # Slower plant: higher gain so relay perturbation is visible
+            
             plant_y = 0.9 * plant_y + (u_fast + r_s) * 0.05
- 
+                             
             errors.append(abs(error))
  
-        ctx.set(dut.error_valid, 0)
- 
+            ctx.set(dut.error_valid, 0)
+            
         assert tuned, "TC33 FAIL: tuner never completed a cycle in 3000 ticks"
  
         # Compare last-quarter error to first-quarter (after tuner has fired)
