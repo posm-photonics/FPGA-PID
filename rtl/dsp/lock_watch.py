@@ -121,6 +121,7 @@ class LockWatch(Elaboratable):
         adc_bad = Signal()
         saturation_bad = Signal()
         output_jump = Signal()
+        diff = Signal(signed(17))
 
         # Error absolute value
         error_abs = Signal(self.ERROR_WIDTH)
@@ -150,15 +151,18 @@ class LockWatch(Elaboratable):
             adc_bad.eq(~self.adc_valid),
 
             saturation_bad.eq(self.fast_saturated | self.slow_saturated),
+        ]
 
-            diff = Signal(signed(17))
-            diff = self.fast_output.as_signed() - previous_fast.as_signed()
-            
-            m.d.comb += output_jump.eq(
-                self.lock_active 
+        m.d.comb += [
+            diff.eq(self.fast_output.as_signed() - previous_fast.as_signed()),
+            output_jump.eq(
+                self.lock_active
                 &
                 Abs(diff) > self.jump_limit
-            )
+            ),
+        ]
+
+        m.d.comb += [
         ]
 
         # Diagnostics
