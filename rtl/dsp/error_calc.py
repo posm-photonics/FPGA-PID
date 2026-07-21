@@ -9,7 +9,11 @@
 
 from amaranth import *
 from amaranth.sim import *
+import os 
+import sys
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+from rtl.common.sat_math import SatMath
 
 class ErrorCalc(Elaboratable):
     """
@@ -61,7 +65,8 @@ class ErrorCalc(Elaboratable):
         x_corr   = Signal(signed(self.adc_w + 1))
         err_raw  = Signal(signed(self.adc_w + 2))
         err_wide = Signal(signed(self.err_w))
-
+        sat = SatMath(self.err_w + 1, self.err_w)
+        m.submodules.sat = sat
         # -------------------------------------------------------
         # Combinational: compute error each cycle
         # Amaranth automatically handles sign extension when
@@ -70,9 +75,11 @@ class ErrorCalc(Elaboratable):
         m.d.comb += [
             x_corr.eq(self.sample_in - self.offset),
             err_raw.eq(x_corr - self.setpoint),
-            err_wide.eq(err_raw),
         ]
-
+        with m.If(self.invert_error):
+            m.d.comb += sat.value_in.eq(-err_raw)
+        with m.Else():
+            m.d.comb += sat.value_in.eq(err_raw)
         # -------------------------------------------------------
         # Registered output — 1 cycle latency
         # -------------------------------------------------------
@@ -85,5 +92,6 @@ class ErrorCalc(Elaboratable):
                 m.d.sync += self.error_out.eq(-err_wide)
             with m.Else():
                 m.d.sync += self.error_out.eq(err_wide)
-
+                
+        
         return m
