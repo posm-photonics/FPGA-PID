@@ -34,7 +34,6 @@
 from amaranth import *
 from amaranth.sim import *
  
- 
 # ---------------------------------------------------------------------------
 # PICore — unchanged functional behaviour, gains now driven by RelayTuner
 # ---------------------------------------------------------------------------
@@ -328,19 +327,17 @@ class RelayTuner(Elaboratable):
         self.tuning_active  = Signal()
         self.tune_valid     = Signal()
         self.ku_out         = Signal(signed(gain_w))
-        self.tu_out         = Signal(32)
- 
+        self.tu_out         = Signal(32)  
     def elaborate(self, platform):
         m = Module()
  
         gain_frac = self.gain_frac
- 
         # ---------------------------------------------------------------
         # Gain registers (EMA-smoothed, updated after each relay cycle)
         # ---------------------------------------------------------------
         kp_reg = Signal(signed(self.gain_w), init=self.kp_init)
         ki_reg = Signal(signed(self.gain_w), init=self.ki_init)
- 
+
         m.d.comb += [
             self.kp_out.eq(kp_reg),
             self.ki_out.eq(ki_reg),
@@ -348,7 +345,7 @@ class RelayTuner(Elaboratable):
  
         # relay output register
         relay_reg = Signal(signed(self.relay_w))
-        m.d.comb += self.relay_out.eq(relay_reg)
+        m.d.sync += self.relay_out.eq(relay_reg)
  
         # oscillation measurement registers
         half_period_counter = Signal(32)   # counts samples in current half-period
@@ -631,7 +628,7 @@ class RelayTuner(Elaboratable):
                             half_period_count.eq(half_period_count + 1),
                             half_period_counter.eq(0),
                         ]
-                        with m.If(half_period_count >= self.min_half_periods):
+                        with m.If((half_period_count + 1) >= self.min_half_periods):
                             m.next = "COMPUTE"
                         with m.Else():
                             m.next = "RELAY_N"
@@ -660,17 +657,16 @@ class RelayTuner(Elaboratable):
                     ]
  
                     # zero crossing from - to + signals end of negative half-period
-                    with m.If(zero_cross & ~self.error_in[-1]):
-                        m.d.sync += [
-                            half_period_sum.eq(
-                                half_period_sum + half_period_counter),
-                            half_period_count.eq(half_period_count + 1),
-                            half_period_counter.eq(0),
-                        ]
-                        with m.If(half_period_count >= self.min_half_periods):
-                            m.next = "COMPUTE"
-                        with m.Else():
-                            m.next = "RELAY_P"
+                with m.If(zero_cross & ~self.error_in[-1]):
+                    m.d.sync += [
+                        half_period_sum.eq(half_period_sum + half_period_counter),
+                        half_period_count.eq(half_period_count + 1),
+                        half_period_counter.eq(0),
+                ]
+                with m.If((half_period_count + 1) >= self.min_half_periods):  # <-- add +1
+                    m.next = "COMPUTE"
+                with m.Else():
+                    m.next = "RELAY_P"
  
             with m.State("COMPUTE"):
                 # One registered cycle: compute new Ku, apply EMA to kp/ki
@@ -705,7 +701,10 @@ class RelayTuner(Elaboratable):
  
                 # Continue tuning immediately if still enabled
                 with m.If(self.tune_enable):
-                    m.next = "RELAY_P"
+                    with m.If(relay_reg[-1]):      # relay_reg was negative -> we just left RELAY_N
+                        m.next = "RELAY_P"
+                    with m.Else():                  # relay_reg was positive -> we just left RELAY_P
+                        m.next = "RELAY_N"
                 with m.Else():
                     m.next = "IDLE"
  
