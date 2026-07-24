@@ -16,14 +16,7 @@
 #   sat_Nto M  : N-bit signed  -> M-bit signed (generic)
 
 from amaranth import *
-from amaranth.sim import *
 
-
-# -------------------------------------------------------
-# Pure Python saturation functions
-# Use these in testbenches, scripts, and gain calculators
-# They mirror exactly what the hardware does
-# -------------------------------------------------------
 
 def sat(value, out_w):
     """

@@ -191,7 +191,10 @@ def test_sat_math():
                                    expected_hi, expected_lo,
                                    name):
             ctx.set(dut.value_in, in_val)
-            await ctx.tick()
+            # SatMath is purely combinational (no m.d.sync), so
+            # there's no clock domain to tick — just give the
+            # simulator a moment to settle and read the result.
+            await ctx.delay(1e-9)
             out    = ctx.get(dut.value_out)
             sat_hi = ctx.get(dut.sat_hi)
             sat_lo = ctx.get(dut.sat_lo)
@@ -235,7 +238,6 @@ def test_sat_math():
         await apply_and_check(-32769, -32768,  0, 1, "one_below_min")
 
     sim = Simulator(dut)
-    sim.add_clock(1e-8)
     sim.add_testbench(hw_testbench)
 
     os.makedirs("outputs/waveforms", exist_ok=True)
