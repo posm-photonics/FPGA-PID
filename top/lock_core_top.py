@@ -1,8 +1,6 @@
 from amaranth import *
 
 from rtl.adc.adc_frontend_top import ADCFrontendTop
-from rtl.adc.adc_formatter import ADCFormatter
-from rtl.adc.adc_guard import ADCGuard
 from rtl.autolock.robust_autolock import RobustAutoLock
 from rtl.bus.register_bank import RegisterBank
 from rtl.control.fault_gate import FaultGate
@@ -39,19 +37,26 @@ class LockCoreTop(Elaboratable):
         self.i_adc_overrange_ch0 = Signal()
         self.i_adc_overrange_ch1 = Signal()
         self.i_format_mode = Signal()
-        self.i_external_interlock = Signal()
+        self.i_external_interlock = Signal() # external safety signal coming from hardware.
         self.i_feature_selected = Signal()
 
-        # Actuator outputs exposed to the board wrapper.
+        # Final outputs exposed to the board wrapper.
         self.o_dac_fast = Signal(16)
         self.o_dac_slow = Signal(16)
 
-        # Shared memory-mapped register interface.
-        self.adr = Signal(12)
-        self.dat_w = Signal(32)
-        self.dat_r = Signal(32)
-        self.we = Signal()
-        self.stb = Signal()
+        # Shared memory-mapped register interface: Software -->(to) FPGA
+        self.adr = Signal(12)       # register address bus
+
+        self.dat_w = Signal(32)     # data being written into the register
+                                    # from software to FPGA
+
+        self.dat_r = Signal(32)     # data being read from the register
+                                    # so from FPGA back to software
+
+        self.we = Signal()          # write enable: tells the FPGA
+                                    # "This bus transaction is a write"
+
+        self.stb = Signal()         # stb : strobe or this transaction is valid
 
         # Supervisory status exposed to software and board glue.
         self.lock_state = Signal(4)
@@ -67,10 +72,10 @@ class LockCoreTop(Elaboratable):
         m.domains.sync = ClockDomain(clk=self.clk, reset=self.rst)
 
         # Submodules are instantiated explicitly so the hierarchy is visible.
+        # ADCFrontendTop owns the ADC formatting, validity checks, and fault
+        # generation for the fast path; LockCoreTop only connects the blocks.
         m.submodules.reg_bank = reg_bank = RegisterBank()
         m.submodules.adc_frontend = adc_frontend = ADCFrontendTop()
-        m.submodules.adc_formatter = adc_formatter = ADCFormatter()
-        m.submodules.adc_guard = adc_guard = ADCGuard()
         m.submodules.error_calc = error_calc = ErrorCalc()
         m.submodules.pi_ctrl = pi_ctrl = PICore()
         m.submodules.output_limiter = output_limiter = OutputLimiter()
@@ -83,8 +88,14 @@ class LockCoreTop(Elaboratable):
         m.submodules.lock_watch = lock_watch = LockWatch()
         m.submodules.lock_fsm = lock_fsm = LockFSM()
 
-        # The register bank owns the global control/status registers.
-        # Each other register-owning block is connected to the same bus.
+        # ------------------------------------------------------------------
+        # Register bus connections
+        #
+        # The FPGA uses one shared register bus. Each module that owns
+        # registers is connected to this bus so software can configure it
+        # or read its status. Each module responds only to its own address
+        # range.
+        # ------------------------------------------------------------------
         read_data = Signal(32)
         fault_vector = Signal(12)
         fault_source = Signal()
@@ -109,12 +120,14 @@ class LockCoreTop(Elaboratable):
             trace_capture.dat_w.eq(self.dat_w),
             trace_capture.we.eq(self.we),
             trace_capture.stb.eq(self.stb),
+
+            # Read data from all modules is combined into a single bus because
+            # only one module should respond for any valid address.
             read_data.eq(reg_bank.dat_r | slow_recenter.dat_r | trace_capture.dat_r),
             self.dat_r.eq(read_data),
         ]
 
-        # The ADC front-end wrapper exposes the physical ADC pins and keeps the
-        # formatter/guard path explicit for the fast loop.
+        # Connect the physical ADC interface to the ADC front-end.
         m.d.comb += [
             adc_frontend.i_ch0.eq(self.i_adc_ch0),
             adc_frontend.i_ch1.eq(self.i_adc_ch1),
@@ -124,42 +137,47 @@ class LockCoreTop(Elaboratable):
             adc_frontend.i_format_mode.eq(self.i_format_mode),
         ]
 
-        # The fast path is wired directly from ADC samples through formatting,
-        # guarding, error calculation, PI control, limiting, fault gating,
-        # and fast-DAC formatting. No extra pipeline is inserted here.
+        # Fast feedback path:
+        # Wiring the adc_frontend output to the error calculator.
+        pi_load_value = Signal(signed(40))
+        lock_quality_ok = Signal()
         m.d.comb += [
-            adc_formatter.i_ch0.eq(self.i_adc_ch0),
-            adc_formatter.i_ch1.eq(self.i_adc_ch1),
-            adc_formatter.i_valid.eq(self.i_adc_valid),
-            adc_formatter.i_format_mode.eq(self.i_format_mode),
-            adc_guard.i_ch0.eq(adc_formatter.o_ch0),
-            adc_guard.i_ch1.eq(adc_formatter.o_ch1),
-            adc_guard.i_valid.eq(adc_formatter.o_valid),
-            adc_guard.i_overrange_ch0.eq(self.i_adc_overrange_ch0),
-            adc_guard.i_overrange_ch1.eq(self.i_adc_overrange_ch1),
-            error_calc.sample_in.eq(adc_guard.i_ch0),
-            error_calc.sample_valid.eq(adc_guard.o_valid),
+            error_calc.sample_in.eq(adc_frontend.o_ch0),
+            error_calc.sample_valid.eq(adc_frontend.o_valid),
             error_calc.offset.eq(0),
             error_calc.setpoint.eq(0),
             error_calc.invert_error.eq(0),
+            pi_load_value.eq(Cat(autolock.slow_lock_position, Const(0, 24)).as_signed()),
+            lock_quality_ok.eq(adc_frontend.o_valid & ~output_limiter.o_sat & ~fault_source),
         ]
 
-        # The PI controller is enabled only while the supervisory FSM has armed
-        # the feedback path. The integrator is reset or reloaded from the control
-        # register bits emitted by the register bank.
+        # Implemented in this integration:
+        # - PI controller block exists
+        # - PI control wiring exists
+        # - DAC fast formatter exists
+        #
+        # Not implemented yet:
+        # - Kp/Ki software configuration path
+        # - PI handoff loading source
+        # - programmable safe output
+        # - DAC fast formatter mode selection
+        # - DAC slow formatter integration
+        #
+        # The PI controller is enabled only after the lock FSM confirms that
+        # the system is ready for feedback control.
         m.d.comb += [
             pi_ctrl.error_in.eq(error_calc.error_out),
             pi_ctrl.error_valid.eq(error_calc.error_valid),
-            pi_ctrl.kp.eq(0),
-            pi_ctrl.ki.eq(0),
+            pi_ctrl.kp.eq(reg_bank.fast_kp),
+            pi_ctrl.ki.eq(reg_bank.fast_ki),
             pi_ctrl.lock_enable.eq(lock_fsm.feedback_enable),
             pi_ctrl.hold_enable.eq(reg_bank.hold_request),
             pi_ctrl.integrator_reset.eq(reg_bank.integrator_reset),
-            pi_ctrl.integrator_load.eq(reg_bank.integrator_load),
-            pi_ctrl.load_value.eq(0),
-            pi_ctrl.out_min.eq(-32768),
-            pi_ctrl.out_max.eq(32767),
-            pi_ctrl.out_safe.eq(0),
+            pi_ctrl.integrator_load.eq(reg_bank.integrator_load | (lock_fsm.state == LockState.ARM_LOCK)),
+            pi_ctrl.load_value.eq(pi_load_value),
+            pi_ctrl.out_min.eq(reg_bank.fast_out_min),
+            pi_ctrl.out_max.eq(reg_bank.fast_out_max),
+            pi_ctrl.out_safe.eq(reg_bank.fast_out_safe),
         ]
 
         # The output limiter clamps the actuator-facing signal before it reaches
@@ -188,29 +206,42 @@ class LockCoreTop(Elaboratable):
         # recentering block once the slow control loop is active. The repo does
         # not contain a separate DAC-slow formatter module, so the recenter block
         # is used as the slow-path formatter/driver in this integration.
+        slow_dac_source = Signal(signed(16))
+        scan_path_active = Signal()
         m.d.comb += [
+            scan_path_active.eq(
+                (lock_fsm.state == LockState.WIDE_SCAN)
+                | (lock_fsm.state == LockState.TRACE_READY)
+                | (lock_fsm.state == LockState.ZOOM_SCAN)
+                | (lock_fsm.state == LockState.FEATURE_VERIFY)
+                | (lock_fsm.state == LockState.ARM_LOCK)
+                | (lock_fsm.state == LockState.RELOCK_SCAN)
+            ),
+            slow_dac_source.eq(Mux(scan_path_active, ramp_scan.ramp_out, slow_recenter.slow_out)),
             ramp_scan.enable.eq(lock_fsm.wide_scan_enable | lock_fsm.zoom_scan_enable),
             ramp_scan.zoom_mode.eq(lock_fsm.zoom_scan_enable),
-            ramp_scan.ramp_min.eq(-32768),
-            ramp_scan.ramp_max.eq(32767),
-            ramp_scan.ramp_step.eq(32),
-            ramp_scan.ramp_tick_div.eq(32),
-            ramp_scan.ramp_center.eq(0),
-            ramp_scan.ramp_width.eq(1024),
+            # The FSM decides when scanning happens; the register bank provides
+            # the scan parameters and speed settings that define how it scans.
+            ramp_scan.ramp_min.eq(reg_bank.ramp_min),
+            ramp_scan.ramp_max.eq(reg_bank.ramp_max),
+            ramp_scan.ramp_step.eq(reg_bank.ramp_step),
+            ramp_scan.ramp_tick_div.eq(reg_bank.ramp_tick_div),
+            ramp_scan.ramp_center.eq(reg_bank.ramp_center),
+            ramp_scan.ramp_width.eq(reg_bank.ramp_width),
             autolock.scan_valid.eq(ramp_scan.ramp_valid),
             autolock.scan_done.eq(ramp_scan.cycle_done),
             autolock.scan_code.eq(ramp_scan.ramp_out),
             autolock.error_sample.eq(error_calc.error_out),
-            autolock.window_min.eq(0),
-            autolock.window_max.eq(65535),
-            autolock.expected_min_x.eq(0),
-            autolock.expected_max_x.eq(0),
-            autolock.lock_x.eq(0),
-            autolock.amp_min.eq(0),
-            autolock.width_min.eq(0),
-            autolock.width_max.eq(65535),
-            autolock.slope_sign.eq(0),
-            autolock.retry_limit.eq(3),
+            autolock.window_min.eq(reg_bank.autolock_window_min),
+            autolock.window_max.eq(reg_bank.autolock_window_max),
+            autolock.expected_min_x.eq(reg_bank.autolock_expected_min_x),
+            autolock.expected_max_x.eq(reg_bank.autolock_expected_max_x),
+            autolock.lock_x.eq(reg_bank.autolock_lock_x),
+            autolock.amp_min.eq(reg_bank.autolock_amp_min),
+            autolock.width_min.eq(reg_bank.autolock_width_min),
+            autolock.width_max.eq(reg_bank.autolock_width_max),
+            autolock.slope_sign.eq(reg_bank.autolock_slope_sign),
+            autolock.retry_limit.eq(reg_bank.autolock_retry_limit),
             autolock.rst.eq(self.rst),
             slow_recenter.dac_fast_in.eq(output_limiter.o_u),
             slow_recenter.sample_valid.eq(adc_frontend.o_valid),
@@ -226,7 +257,10 @@ class LockCoreTop(Elaboratable):
             trace_capture.ch1_sample.eq(adc_frontend.o_ch1),
         ]
 
-        # The supervisory FSM consumes register-bank and subsystem status.
+        # The lock FSM is the system supervisor.
+        # It receives commands from the register bank and status information
+        # from the other modules to decide the current operating state:
+        # idle, scanning, locking, locked, or fault.
         m.d.comb += [
             lock_fsm.global_enable.eq(reg_bank.global_enable),
             lock_fsm.lock_enable_request.eq(reg_bank.lock_enable_request),
@@ -238,8 +272,8 @@ class LockCoreTop(Elaboratable):
             lock_fsm.zoom_complete.eq(ramp_scan.cycle_done),
             lock_fsm.autolock_success.eq(autolock.feature_match),
             lock_fsm.autolock_failed.eq(autolock.feature_failed),
-            lock_fsm.lock_check_pass.eq(1),
-            lock_fsm.lock_check_failed.eq(0),
+            lock_fsm.lock_check_pass.eq(lock_quality_ok),
+            lock_fsm.lock_check_failed.eq(~lock_quality_ok),
             lock_fsm.relock_request.eq(lock_watch.relock_request),
         ]
 
@@ -267,11 +301,11 @@ class LockCoreTop(Elaboratable):
 
         # The fault vector is a simple composite of the available safety inputs.
         m.d.comb += [
-            fault_vector[0].eq(adc_guard.o_fault_flags[0]),
-            fault_vector[1].eq(adc_guard.o_fault_flags[1]),
-            fault_vector[2].eq(adc_guard.o_fault_flags[2]),
-            fault_vector[3].eq(adc_guard.o_fault_flags[3]),
-            fault_vector[4].eq(adc_guard.o_fault_flags[4]),
+            fault_vector[0].eq(adc_frontend.o_fault_flags[0]),
+            fault_vector[1].eq(adc_frontend.o_fault_flags[1]),
+            fault_vector[2].eq(adc_frontend.o_fault_flags[2]),
+            fault_vector[3].eq(adc_frontend.o_fault_flags[3]),
+            fault_vector[4].eq(adc_frontend.o_fault_flags[4]),
             fault_vector[5].eq(lock_watch.fault_request),
             fault_vector[6].eq(lock_watch.relock_request),
             fault_vector[7].eq(self.i_external_interlock),
@@ -285,11 +319,11 @@ class LockCoreTop(Elaboratable):
         # Top-level outputs expose the current status for software and board glue.
         m.d.comb += [
             self.o_dac_fast.eq(dac_fast_fmt.o_dac),
-            self.o_dac_slow.eq(slow_recenter.slow_out),
+            self.o_dac_slow.eq(slow_dac_source),
             self.lock_state.eq(lock_fsm.state),
             self.lock_fault.eq(lock_fsm.fault_state),
             self.fast_output.eq(dac_fast_fmt.o_dac),
-            self.slow_output.eq(slow_recenter.slow_out),
+            self.slow_output.eq(slow_dac_source),
             self.trace_ready.eq(trace_capture.trace_ready),
         ]
 
