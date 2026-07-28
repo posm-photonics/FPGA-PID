@@ -43,7 +43,7 @@ with FAULT_ENABLE, per the "explicit fault clear" requirement in
 section 10.2.
 """
 
-from amaranth import Module, Signal, Elaboratable, Cat, Mux, Const
+from amaranth import Module, Signal, Elaboratable, Cat, Mux, Const, signed
 
 from .register_defs import (
     ADDR_VERSION, ADDR_CONTROL, ADDR_STATUS, ADDR_MODE,
@@ -99,6 +99,32 @@ class RegisterBank(Elaboratable):
 
         # --- MODE: passthrough R/W register (interpreted by lock_fsm) ---
         self.mode = Signal(8)
+
+        # --- Placeholder configuration hooks for the fast loop and scan path ---
+        # These are intentionally minimal wiring points so the top-level wrapper
+        # can use register-bank signals without introducing a larger redesign.
+        # They are expected to be mapped onto the software register map later.
+        self.fast_kp = Signal(signed(18), reset=0)
+        self.fast_ki = Signal(signed(18), reset=0)
+        self.fast_out_min = Signal(signed(16), reset=-32768)
+        self.fast_out_max = Signal(signed(16), reset=32767)
+        self.fast_out_safe = Signal(signed(16), reset=0)
+        self.ramp_min = Signal(signed(16), reset=-32768)
+        self.ramp_max = Signal(signed(16), reset=32767)
+        self.ramp_step = Signal(16, reset=32)
+        self.ramp_tick_div = Signal(16, reset=32)
+        self.ramp_center = Signal(signed(16), reset=0)
+        self.ramp_width = Signal(16, reset=1024)
+        self.autolock_window_min = Signal(16, reset=0)
+        self.autolock_window_max = Signal(16, reset=65535)
+        self.autolock_expected_min_x = Signal(16, reset=0)
+        self.autolock_expected_max_x = Signal(16, reset=0)
+        self.autolock_lock_x = Signal(16, reset=0)
+        self.autolock_amp_min = Signal(signed(24), reset=0)
+        self.autolock_width_min = Signal(16, reset=0)
+        self.autolock_width_max = Signal(16, reset=65535)
+        self.autolock_slope_sign = Signal(reset=0)
+        self.autolock_retry_limit = Signal(8, reset=3)
 
         # --- STATUS: inputs from the rest of the design (comb in) ---
         self.state          = Signal(4)   # from lock_fsm

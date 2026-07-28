@@ -292,11 +292,10 @@ class RobustAutoLock(Elaboratable):
                         state.eq(AutoLockState.SUCCESS)
                     )
 
-                .Else(
+                with m.Else():
                     m.d.sync += (
                         state.eq(AutoLockState.RETRY)
                     )
-                )
 
             # --------------------------------------------------------
             # SUCCESS
@@ -329,7 +328,7 @@ class RobustAutoLock(Elaboratable):
                         state.eq(AutoLockState.IDLE)
                     ]
 
-                .Else:
+                with m.Else():
                     m.d.sync += (
                         state.eq(AutoLockState.FAIL)
                     )

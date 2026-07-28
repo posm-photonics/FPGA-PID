@@ -193,6 +193,22 @@ class LockFSM(Elaboratable):
             (state != LockState.FAULT)
         )
 
+        m.d.comb += [
+            self.fault_state.eq(state == LockState.FAULT),
+            self.wide_scan_enable.eq(state == LockState.WIDE_SCAN),
+            self.zoom_scan_enable.eq(state == LockState.ZOOM_SCAN),
+            self.trace_enable.eq(state == LockState.WIDE_SCAN),
+            self.autolock_enable.eq(state == LockState.FEATURE_VERIFY),
+            self.feedback_enable.eq(
+                (state == LockState.ARM_LOCK)
+                | (state == LockState.LOCKED)
+                | (state == LockState.LOCK_WATCH)
+            ),
+            self.lock_watch_enable.eq(
+                (state == LockState.LOCKED)
+                | (state == LockState.LOCK_WATCH)
+            ),
+        ]
 
         # =============================================================
         # Fault priority logic
@@ -304,6 +320,7 @@ class LockFSM(Elaboratable):
 
         with m.Elif(state == LockState.LOCK_WATCH):
 
+            with m.If((self.lock_check_failed) | (self.relock_request)):
             with m.If(self.lock_check_failed | self.relock_request):
                 m.d.sync += state.eq(
                     LockState.RELOCK_SCAN
