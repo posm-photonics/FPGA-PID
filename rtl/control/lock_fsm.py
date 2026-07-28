@@ -163,6 +163,15 @@ class LockFSM(Elaboratable):
         # Fault state output
         self.fault_state = Signal()
 
+        # Asserted whenever a hold is actually in effect (i.e.
+        # hold_request is high and it's not being overridden by a
+        # fault). The sequencer is frozen at its current state while
+        # this is high -- outputs for whatever state it's frozen in
+        # keep running (e.g. feedback_enable stays up if held in
+        # LOCKED/LOCK_WATCH), but no automatic or conditional state
+        # transition occurs until hold_request drops.
+        self.hold_active = Signal()
+
 
     # -----------------------------------------------------------------
     # RTL
@@ -172,9 +181,17 @@ class LockFSM(Elaboratable):
 
         m = Module()
 
-        state = Signal(LockState, reset=LockState.IDLE)
+        state = Signal(LockState, init=LockState.IDLE)
 
-        m.d.sync += self.state.eq(state)
+        m.d.comb += self.state.eq(state)
+
+        # Hold only actually takes effect when it isn't overridden by
+        # a fault (mirrors the priority order above: fault wins).
+        m.d.comb += self.hold_active.eq(
+            self.hold_request &
+            ~self.fault_active &
+            (state != LockState.FAULT)
+        )
 
 
         # =============================================================
@@ -191,6 +208,20 @@ class LockFSM(Elaboratable):
                 m.d.sync += state.eq(
                     LockState.IDLE
                 )
+
+
+        # =============================================================
+        # Hold
+        #
+        # Sits directly below fault handling: a fault (and clearing a
+        # fault) always takes priority over a hold request. When held,
+        # none of the per-state transition logic below runs, so `state`
+        # simply keeps its current value -- the sequencer freezes
+        # exactly where it is until hold_request drops.
+        # =============================================================
+
+        with m.Elif(self.hold_request):
+            pass
 
 
         # =============================================================
@@ -273,7 +304,7 @@ class LockFSM(Elaboratable):
 
         with m.Elif(state == LockState.LOCK_WATCH):
 
-            with m.If(self.lock_check_failed || self.relock_request):
+            with m.If(self.lock_check_failed | self.relock_request):
                 m.d.sync += state.eq(
                     LockState.RELOCK_SCAN
                 )

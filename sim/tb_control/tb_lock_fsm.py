@@ -1,46 +1,14 @@
 """
 tb_lock_fsm.py
 Testbench for lock_fsm.LockFSM (POSM FPGA MTS Laser Lock - supervisory FSM)
-
-REQUIRED FIX BEFORE THIS WILL RUN
-----------------------------------
-lock_fsm.py currently contains:
-
-    with m.If(self.lock_check_failed || self.relock_request):
-
-`||` is not valid Python/Amaranth. It needs to be a bitwise OR on two
-1-bit signals:
-
-    with m.If(self.lock_check_failed | self.relock_request):
-
-OBSERVATIONS (flagged, not silently patched around)
------------------------------------------------------
-1. `self.state` (the state exposed to the register bank) is registered a
-   SECOND time on top of the internal `state` signal:
-
-       m.d.sync += self.state.eq(state)
-
-   The Switch-based output decoding (wide_scan_enable, feedback_enable,
-   etc.) is driven combinationally off the internal `state`, so the comb
-   outputs always reflect the FSM's current state one cycle *before*
-   `self.state` reports it. This testbench treats the comb outputs as
-   ground truth for "what state is the FSM in right now" and separately
-   documents the one-cycle lag on `self.state` in
-   test_state_output_lags_by_one_cycle(). If that lag is unintentional,
-   drive it combinationally instead: `m.d.comb += self.state.eq(state)`.
-
-2. `hold_request` is declared as an input but is never referenced anywhere
-   in elaborate() -- it currently has no effect on the FSM. Flagging in
-   case it was meant to pause/hold the current state.
-
 Run directly with: python3 tb_lock_fsm.py
 """
-
+import sys
 import os
 
 from amaranth.sim import Simulator
-
-from lock_fsm import LockFSM, LockState
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+from rtl.control.lock_fsm import LockFSM, LockState
 
 
 def new_dut():
@@ -323,10 +291,11 @@ def test_global_enable_gates_start():
     run(dut, tb, "test_global_enable_gates_start")
 
 
-def test_state_output_lags_by_one_cycle():
-    """Documents the one-cycle lag between the comb-decoded outputs
-    (driven directly off the internal `state`) and the registered
-    `self.state` output -- see OBSERVATIONS #1 at the top of this file."""
+def test_state_output_is_same_cycle_as_decoded_outputs():
+    """self.state and the m.Switch-decoded outputs (wide_scan_enable
+    etc.) are both purely combinational off the same internal `state`
+    register, so they update on the exact same cycle -- there is no
+    one-cycle lag between them."""
     dut = new_dut()
 
     async def tb(ctx):
@@ -336,17 +305,93 @@ def test_state_output_lags_by_one_cycle():
         ctx.set(dut.global_enable, 1)
         ctx.set(dut.lock_enable_request, 1)
 
-        await ctx.tick()  # internal state -> WIDE_SCAN; dut.state still IDLE
+        await ctx.tick()  # state -> WIDE_SCAN, same cycle as the output
         ctx.set(dut.lock_enable_request, 0)
         assert ctx.get(dut.wide_scan_enable) == 1
-        assert int(ctx.get(dut.state)) == LockState.IDLE.value
-
-        await ctx.tick()  # dut.state now catches up to WIDE_SCAN
         assert int(ctx.get(dut.state)) == LockState.WIDE_SCAN.value
 
-        print("PASS: test_state_output_lags_by_one_cycle")
+        print("PASS: test_state_output_is_same_cycle_as_decoded_outputs")
 
-    run(dut, tb, "test_state_output_lags_by_one_cycle")
+    run(dut, tb, "test_state_output_is_same_cycle_as_decoded_outputs")
+
+
+def test_hold_freezes_state_and_releases_cleanly():
+    """hold_request should freeze the sequencer exactly where it is --
+    no automatic or conditional transition should occur while held,
+    the frozen state's outputs should keep running, and releasing
+    hold should let the FSM continue exactly where it left off."""
+    dut = new_dut()
+
+    async def tb(ctx):
+        await all_inputs_low(ctx, dut)
+        await ctx.tick()
+        await drive_to_lock_watch(ctx, dut)
+        assert ctx.get(dut.feedback_enable) == 1
+        assert ctx.get(dut.lock_watch_enable) == 1
+
+        # Hold while in LOCK_WATCH.
+        ctx.set(dut.hold_request, 1)
+        await ctx.tick()
+        assert ctx.get(dut.hold_active) == 1
+        # Frozen state's outputs keep running.
+        assert ctx.get(dut.feedback_enable) == 1
+        assert ctx.get(dut.lock_watch_enable) == 1
+
+        # Try to force a transition while held -- must NOT move.
+        ctx.set(dut.lock_check_failed, 1)
+        await ctx.tick()
+        assert ctx.get(dut.lock_watch_enable) == 1  # still LOCK_WATCH
+        assert ctx.get(dut.feedback_enable) == 1
+        ctx.set(dut.lock_check_failed, 0)
+
+        # Release hold -- FSM should now resume and see the (still
+        # pending) failure condition on the very next qualifying edge.
+        ctx.set(dut.hold_request, 0)
+        ctx.set(dut.lock_check_failed, 1)
+        await ctx.tick()
+        ctx.set(dut.lock_check_failed, 0)
+        assert ctx.get(dut.hold_active) == 0
+        assert ctx.get(dut.feedback_enable) == 0
+        assert ctx.get(dut.lock_watch_enable) == 0
+
+        print("PASS: test_hold_freezes_state_and_releases_cleanly")
+
+    run(dut, tb, "test_hold_freezes_state_and_releases_cleanly")
+
+
+def test_fault_overrides_hold():
+    """A fault must still interrupt and be clearable even while
+    hold_request is asserted -- hold must never block fault safety."""
+    dut = new_dut()
+
+    async def tb(ctx):
+        await all_inputs_low(ctx, dut)
+        await ctx.tick()
+        await drive_to_wide_scan(ctx, dut)
+
+        ctx.set(dut.hold_request, 1)
+        await ctx.tick()
+        assert ctx.get(dut.hold_active) == 1
+
+        # Fault hits while held -- must override immediately.
+        ctx.set(dut.fault_active, 1)
+        await ctx.tick()
+        assert ctx.get(dut.fault_state) == 1
+        assert ctx.get(dut.hold_active) == 0  # fault, not hold, is in effect
+        assert ctx.get(dut.wide_scan_enable) == 0
+
+        # Fault must still be clearable even with hold_request held high.
+        ctx.set(dut.fault_active, 0)
+        ctx.set(dut.fault_clear_request, 1)
+        await ctx.tick()
+        ctx.set(dut.fault_clear_request, 0)
+        assert ctx.get(dut.fault_state) == 0
+        # Back in IDLE, now hold takes over again (hold_request still 1).
+        assert ctx.get(dut.hold_active) == 1
+
+        print("PASS: test_fault_overrides_hold")
+
+    run(dut, tb, "test_fault_overrides_hold")
 
 
 if __name__ == "__main__":
@@ -356,5 +401,7 @@ if __name__ == "__main__":
     test_feature_verify_failure_path()
     test_fault_overrides_and_clears()
     test_global_enable_gates_start()
-    test_state_output_lags_by_one_cycle()
+    test_state_output_is_same_cycle_as_decoded_outputs()
+    test_hold_freezes_state_and_releases_cleanly()
+    test_fault_overrides_hold()
     print("\nAll lock_fsm tests passed.")

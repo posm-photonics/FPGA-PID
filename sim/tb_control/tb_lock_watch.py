@@ -68,10 +68,10 @@ Run directly with: python3 tb_lock_watch.py
 """
 
 import os
-
+import sys
 from amaranth.sim import Simulator
-
-from lock_watch import LockWatch
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+from rtl.dsp.lock_watch import LockWatch
 
 
 def new_dut():
