@@ -101,14 +101,13 @@ class LockWatch(Elaboratable):
         self.adc_fault_active = Signal()    # The ADC input is not reliable
         self.sat_fault_active = Signal()    # DAC saturated for too long
 
-
     def elaborate(self, platform):
 
         m = Module()
 
         # Previous DAC storage
         previous_fast = Signal(self.DAC_WIDTH)
-
+        history_valid  = Signal()
         # Counters
         sat_counter = Signal(self.COUNT_WIDTH)
         adc_counter = Signal(self.COUNT_WIDTH)
@@ -133,23 +132,14 @@ class LockWatch(Elaboratable):
             m.d.comb += error_abs.eq(self.error_value)
 
         # Threshold checks
+        diff = Signal(signed(17))
+        abs_diff = Signal(17)
+
         m.d.comb += [
             error_bad.eq(error_abs > self.max_error),
-
-            fast_rail.eq(
-                (self.fast_output <= self.fast_min)
-                |
-                (self.fast_output >= self.fast_max)
-            ),
-
-            slow_rail.eq(
-                (self.slow_output <= self.slow_min)
-                |
-                (self.slow_output >= self.slow_max)
-            ),
-
+            fast_rail.eq((self.fast_output <= self.fast_min) | (self.fast_output >= self.fast_max)),
+            slow_rail.eq((self.slow_output <= self.slow_min) | (self.slow_output >= self.slow_max)),
             adc_bad.eq(~self.adc_valid),
-
             saturation_bad.eq(self.fast_saturated | self.slow_saturated),
         ]
 
@@ -163,7 +153,13 @@ class LockWatch(Elaboratable):
         ]
 
         m.d.comb += [
+            diff.eq(self.fast_output.as_signed() - previous_fast.as_signed()),
         ]
+        with m.If(diff < 0):
+            m.d.comb += abs_diff.eq(-diff)
+        with m.Else():
+            m.d.comb += abs_diff.eq(diff)
+        m.d.comb += output_jump.eq(self.lock_active & history_valid & (abs_diff > self.jump_limit))
 
         # Diagnostics
         m.d.comb += [
@@ -184,14 +180,14 @@ class LockWatch(Elaboratable):
                 sat_counter.eq(0),
                 adc_counter.eq(0),
                 error_counter.eq(0),
-                output_jump.eq(0)
+                history_valid.eq(0),
             ]
 
 
         with m.Else():
             # Store DAC history
             m.d.sync += previous_fast.eq(self.fast_output)
-
+            m.d.sync += history_valid.eq(1)
             # ADC timeout counter
             with m.If(adc_bad):
                 with m.If(adc_counter < self.adc_timeout):
