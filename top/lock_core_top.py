@@ -11,7 +11,7 @@ from rtl.control.slow_recenter import SlowRecenter
 from rtl.control.trace_capture import TraceCapture
 from rtl.dac.dac_fast_formatter import DACFastFormatter
 from rtl.dsp.error_calc import ErrorCalc
-from rtl.dsp.lock_watch import LockWatch
+from rtl.control.lock_watch import LockWatch
 from rtl.dsp.pi_controller import PICore
 
 

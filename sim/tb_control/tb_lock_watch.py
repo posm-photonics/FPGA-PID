@@ -1,69 +1,6 @@
 """
 tb_lock_watch.py
 Testbench for lock_watch.LockWatch (POSM lock-health supervisor).
-
-REQUIRED FIXES BEFORE THIS WILL RUN
---------------------------------------
-lock_watch.py currently does not parse. The whole `m.d.comb += [...]`
-block that builds the threshold checks has bare Python statements and a
-nested `m.d.comb += ...` call embedded *inside* the list literal:
-
-    m.d.comb += [
-        error_bad.eq(...),
-        fast_rail.eq(...),
-        slow_rail.eq(...),
-        adc_bad.eq(~self.adc_valid),
-        saturation_bad.eq(self.fast_saturated | self.slow_saturated),
-
-        diff = Signal(signed(17))                       # <- not valid here
-        diff = self.fast_output.as_signed() - previous_fast.as_signed()  # <- not valid here
-
-        m.d.comb += output_jump.eq(                      # <- not valid here
-            self.lock_active
-            &
-            Abs(diff) > self.jump_limit
-        )
-    ]
-
-Recommended fix -- pull `diff`/`output_jump` out of the list into their
-own statements, declare `diff` as a Signal up front like the other
-internal signals, and implement absolute value manually (Amaranth has no
-`Abs()` builtin) the same way `error_abs` is already done a few lines
-above for `error_value`:
-
-    diff = Signal(signed(17))
-    abs_diff = Signal(17)
-
-    m.d.comb += [
-        error_bad.eq(error_abs > self.max_error),
-        fast_rail.eq((self.fast_output <= self.fast_min) | (self.fast_output >= self.fast_max)),
-        slow_rail.eq((self.slow_output <= self.slow_min) | (self.slow_output >= self.slow_max)),
-        adc_bad.eq(~self.adc_valid),
-        saturation_bad.eq(self.fast_saturated | self.slow_saturated),
-        diff.eq(self.fast_output.as_signed() - previous_fast.as_signed()),
-    ]
-    with m.If(diff < 0):
-        m.d.comb += abs_diff.eq(-diff)
-    with m.Else():
-        m.d.comb += abs_diff.eq(diff)
-    m.d.comb += output_jump.eq(self.lock_active & (abs_diff > self.jump_limit))
-
-Note the extra parens around `(abs_diff > self.jump_limit)` -- `&` binds
-tighter than `>` in Python, so `self.lock_active & Abs(diff) > self.jump_limit`
-does not group the way it reads.
-
-SECOND BUG -- domain conflict: in the `~self.enable` reset branch,
-`output_jump.eq(0)` is written via `m.d.sync`, but `output_jump` is a
-combinational signal driven elsewhere via `m.d.comb`. Amaranth will
-reject a signal driven from two domains (the same rule called out in the
-Amaranth cheatsheet: "never assign the same signal in both comb and
-sync"). Drop that line from the `~self.enable` sync reset list -- a comb
-signal doesn't need (and can't have) a synchronous reset value.
-
-This testbench is written against the corrected/intended behavior
-described in the module docstring, so it's ready to run once the module
-compiles.
-
 Run directly with: python3 tb_lock_watch.py
 """
 
@@ -71,7 +8,7 @@ import os
 import sys
 from amaranth.sim import Simulator
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-from rtl.dsp.lock_watch import LockWatch
+from rtl.control.lock_watch import LockWatch
 
 
 def new_dut():

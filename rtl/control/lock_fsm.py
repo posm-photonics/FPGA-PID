@@ -319,8 +319,6 @@ class LockFSM(Elaboratable):
 
 
         with m.Elif(state == LockState.LOCK_WATCH):
-
-            with m.If((self.lock_check_failed) | (self.relock_request)):
             with m.If(self.lock_check_failed | self.relock_request):
                 m.d.sync += state.eq(
                     LockState.RELOCK_SCAN
