@@ -96,5 +96,9 @@ if __name__ == "__main__":
     dut = LockCoreTop()
     sim = Simulator(dut)
     sim.add_clock(1e-8)
-    sim.add_process(tb)
+
+    def process():
+        yield from tb(dut)
+
+    sim.add_process(process)
     sim.run()

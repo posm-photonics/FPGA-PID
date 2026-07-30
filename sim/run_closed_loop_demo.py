@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from amaranth import *
-from amaranth.sim import Simulator
+from amaranth.sim import Simulator, Settle, Tick
 
 from rtl.bus.register_defs import (
     ADDR_CONTROL,
@@ -59,10 +59,10 @@ class ClosedLoopRunner:
         yield dut.dat_w.eq(value)
         yield dut.we.eq(1)
         yield dut.stb.eq(1)
-        yield
+        yield Tick()
         yield dut.we.eq(0)
         yield dut.stb.eq(0)
-        yield
+        yield Tick()
 
     def _configure_dut(self):
         yield from self._write_reg(self.dut, ADDR_CONTROL,
@@ -85,14 +85,14 @@ class ClosedLoopRunner:
         def tb(dut: Any):
             yield dut.rst.eq(1)
             for _ in range(4):
-                yield
+                yield Tick()
             yield dut.rst.eq(0)
             yield from self._configure_dut()
 
+            fast_dac = 0
+            slow_dac = 0
             for step in range(self.config.timing.steps):
                 time_s = step * self.config.timing.timestep_s
-                fast_dac = int(getattr(dut, "o_dac_fast", 0)) if hasattr(dut, "o_dac_fast") else 0
-                slow_dac = int(getattr(dut, "o_dac_slow", 0)) if hasattr(dut, "o_dac_slow") else 0
 
                 detuning = self.plant.step(float(fast_dac), float(slow_dac))
                 ideal_error = self.signal.ideal(detuning)
@@ -107,7 +107,16 @@ class ClosedLoopRunner:
                 yield dut.i_adc_overrange_ch1.eq(0)
                 yield dut.i_external_interlock.eq(0)
                 yield dut.i_feature_selected.eq(step > 100)
-                yield
+                yield Tick()
+                yield Settle()
+
+                fast_dac = int((yield dut.o_dac_fast))
+                slow_dac = int((yield dut.o_dac_slow))
+                detuning = self.plant.step(float(fast_dac), float(slow_dac))
+                ideal_error = self.signal.ideal(detuning)
+                measured_error = self.signal.sample(detuning)
+                detuning_adj, adc_sample, fast_adj, slow_adj = self.injector.apply(
+                    detuning, measured_error, fast_dac, slow_dac, time_s)
 
                 self._history.append({
                     "time": time_s,
@@ -117,11 +126,11 @@ class ClosedLoopRunner:
                     "adc_sample": adc_sample,
                     "fast_dac": fast_adj,
                     "slow_dac": slow_adj,
-                    "controller_output": float(getattr(dut, "fast_output", 0)),
-                    "controller_output_before_limiting": float(getattr(dut, "fast_output", 0)),
+                    "controller_output": int((yield dut.fast_output)),
+                    "controller_output_before_limiting": int((yield dut.fast_output)),
                     "controller_output_after_limiting": fast_adj,
                     "integrator": 0.0,
-                    "lock_state": int(getattr(dut, "lock_state", 0)),
+                    "lock_state": int((yield dut.lock_state)),
                     "fault_flags": ",".join(self.injector.active_flags),
                     "thermal_drift": self.signal._drift,
                     "fast_saturation_flag": 1.0 if abs(fast_adj) >= 1000.0 else 0.0,
@@ -130,11 +139,15 @@ class ClosedLoopRunner:
 
             for _ in range(20):
                 yield dut.i_adc_valid.eq(0)
-                yield
+                yield Tick()
 
         sim = Simulator(self.dut)
         sim.add_clock(self.config.timing.clock_period_s)
-        sim.add_process(tb)
+
+        def process():
+            yield from tb(self.dut)
+
+        sim.add_process(process)
         sim.run()
 
     def run(self) -> Dict[str, Any]:

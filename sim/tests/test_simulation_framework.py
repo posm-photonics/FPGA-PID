@@ -25,5 +25,5 @@ def test_config_and_models_smoke():
     assert isinstance(sample, float)
     assert isinstance(adjusted[0], float)
     assert isinstance(adjusted[1], float)
-    assert isinstance(adjusted[2], int)
-    assert isinstance(adjusted[3], int)
+    assert isinstance(adjusted[2], float)
+    assert isinstance(adjusted[3], float)

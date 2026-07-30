@@ -69,7 +69,7 @@ class LockCoreTop(Elaboratable):
         m = Module()
 
         # The lock core uses one synchronous clock domain with explicit reset.
-        m.domains.sync = ClockDomain(clk=self.clk, reset=self.rst)
+        m.domains.sync = ClockDomain()
 
         # Submodules are instantiated explicitly so the hierarchy is visible.
         # ADCFrontendTop owns the ADC formatting, validity checks, and fault
