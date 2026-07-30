@@ -145,15 +145,6 @@ class LockWatch(Elaboratable):
 
         m.d.comb += [
             diff.eq(self.fast_output.as_signed() - previous_fast.as_signed()),
-            output_jump.eq(
-                self.lock_active
-                &
-                Abs(diff) > self.jump_limit
-            ),
-        ]
-
-        m.d.comb += [
-            diff.eq(self.fast_output.as_signed() - previous_fast.as_signed()),
         ]
         with m.If(diff < 0):
             m.d.comb += abs_diff.eq(-diff)

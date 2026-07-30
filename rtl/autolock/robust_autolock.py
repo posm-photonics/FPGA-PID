@@ -31,7 +31,14 @@ from amaranth import *
 from amaranth.lib.enum import Enum
 
 
-class AutoLockState(Enum, "IDLE SCAN TRACK CHECK SUCCESS RETRY FAIL"):
+class AutoLockState(Enum):
+    IDLE = 0
+    SCAN = 1
+    TRACK = 2
+    CHECK = 3
+    SUCCESS = 4
+    RETRY = 5
+    FAIL = 6
     """
     IDLE    → waiting
     SCAN    → receiving zoom scan data
@@ -164,7 +171,7 @@ class RobustAutoLock(Elaboratable):
             ]
 
 
-        with m.Else:
+        with m.Else():
             # Default pulses
             m.d.sync += [
                 self.retry_request.eq(0),
