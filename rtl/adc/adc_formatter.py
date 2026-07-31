@@ -27,8 +27,6 @@ class ADCFormatter(Elaboratable):
     def elaborate(self, platform):
         m = Module()
 
-        m.domains.sync = ClockDomain() #Important for simulation and clock settings
-
         msb_mask = 1 << (self.width - 1) # msb_mask = 2^(N-1) = 2^15
 
         # Offset binary -> 2's complement:
