@@ -11,7 +11,7 @@ from rtl.control.slow_recenter import SlowRecenter
 from rtl.control.trace_capture import TraceCapture
 from rtl.dac.dac_fast_formatter import DACFastFormatter
 from rtl.dsp.error_calc import ErrorCalc
-from rtl.dsp.lock_watch import LockWatch
+from rtl.control.lock_watch import LockWatch
 from rtl.dsp.pi_controller import PICore
 
 
@@ -69,7 +69,18 @@ class LockCoreTop(Elaboratable):
         m = Module()
 
         # The lock core uses one synchronous clock domain with explicit reset.
+        # NOTE: self.clk/self.rst must be explicitly wired into the domain --
+        # declaring the domain alone does not connect it to anything. Without
+        # this, every m.d.sync assignment in the whole hierarchy resolves to
+        # a net with no real driver (verified by generating Verilog: every
+        # submodule's clk wire came out hardwired to constant 0). This was
+        # invisible in the existing testbenches because Amaranth's simulator
+        # drives the "sync" domain by name directly, bypassing this port.
         m.domains.sync = ClockDomain()
+        m.d.comb += [
+            ClockSignal("sync").eq(self.clk),
+            ResetSignal("sync").eq(self.rst),
+        ]
 
         # Submodules are instantiated explicitly so the hierarchy is visible.
         # ADCFrontendTop owns the ADC formatting, validity checks, and fault
