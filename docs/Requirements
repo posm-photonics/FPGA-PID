@@ -1,0 +1,6 @@
+# Elaborates the Amaranth design to Verilog (build/generate_verilog.py)
+amaranth>=0.5
+
+# Yosys backend used by amaranth.back.verilog. Only needed as a fallback
+# if you don't already have a system `yosys` >= 0.40 on PATH.
+amaranth-yosys
