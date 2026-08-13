@@ -76,7 +76,7 @@ width, then the same sign/invert trick is applied going out.
 from amaranth import Module, Signal, Elaboratable, Cat, Const, signed
 
 from top.lock_core_top import LockCoreTop
-from rtl.bus.redpitaya_bus_bridge import RedPitayaBusBridge
+from rtl.bus.RedPitaya_Bus_Bridge import RedPitayaBusBridge
 
 
 class RedPitayaLockCore(Elaboratable):
