@@ -88,6 +88,18 @@ TRACE_STAT_READY        = 1
 TRACE_STAT_OVERFLOW     = 2
 
 # ---------------------------------------------------------------------
+# 11.9 PDH Subsystem
+# ---------------------------------------------------------------------
+ADDR_PDH_CONTROL        = 0x200  # R/W
+ADDR_PDH_MOD_FREQ       = 0x204  # R/W
+ADDR_PDH_MOD_AMP        = 0x208  # R/W
+ADDR_PDH_DEMOD_PHASE    = 0x20C  # R/W
+ADDR_PDH_LPF_ALPHA      = 0x210  # R/W
+
+# PDH_CONTROL bit positions
+PDH_CTRL_ENABLE         = 0
+
+# ---------------------------------------------------------------------
 # Common widths (defaults; override via module parameters as needed)
 # ---------------------------------------------------------------------
 ADC_W = 16   # ADC sample width

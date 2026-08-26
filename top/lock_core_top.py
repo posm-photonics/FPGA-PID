@@ -13,6 +13,7 @@ from rtl.dac.dac_fast_formatter import DACFastFormatter
 from rtl.dsp.error_calc import ErrorCalc
 from rtl.dsp.lock_watch import LockWatch
 from rtl.dsp.pi_controller import PICore
+from rtl.dsp.pdh_frontend import PDHFrontend
 
 
 class LockCoreTop(Elaboratable):
@@ -43,6 +44,7 @@ class LockCoreTop(Elaboratable):
         # Final outputs exposed to the board wrapper.
         self.o_dac_fast = Signal(16)
         self.o_dac_slow = Signal(16)
+        self.o_dac_mod  = Signal(signed(16))  # PDH modulation waveform
 
         # Shared memory-mapped register interface: Software -->(to) FPGA
         self.adr = Signal(12)       # register address bus
@@ -98,6 +100,7 @@ class LockCoreTop(Elaboratable):
         m.submodules.autolock = autolock = RobustAutoLock()
         m.submodules.lock_watch = lock_watch = LockWatch()
         m.submodules.lock_fsm = lock_fsm = LockFSM()
+        m.submodules.pdh_frontend = pdh_frontend = PDHFrontend()
 
         # ------------------------------------------------------------------
         # Register bus connections
@@ -148,13 +151,25 @@ class LockCoreTop(Elaboratable):
             adc_frontend.i_format_mode.eq(self.i_format_mode),
         ]
 
+        # PDH Frontend
+        m.d.comb += [
+            pdh_frontend.adc_sample.eq(adc_frontend.o_ch0),
+            pdh_frontend.adc_valid.eq(adc_frontend.o_valid),
+            pdh_frontend.freq_word.eq(reg_bank.pdh_mod_freq),
+            pdh_frontend.mod_amp.eq(reg_bank.pdh_mod_amp),
+            pdh_frontend.demod_phase.eq(reg_bank.pdh_demod_phase),
+            pdh_frontend.lpf_alpha.eq(reg_bank.pdh_lpf_alpha),
+            pdh_frontend.pdh_enable.eq(reg_bank.pdh_enable),
+            pdh_frontend.reset_filter.eq(self.rst),
+        ]
+
         # Fast feedback path:
-        # Wiring the adc_frontend output to the error calculator.
+        # Wiring the PDH error output to the error calculator.
         pi_load_value = Signal(signed(40))
         lock_quality_ok = Signal()
         m.d.comb += [
-            error_calc.sample_in.eq(adc_frontend.o_ch0),
-            error_calc.sample_valid.eq(adc_frontend.o_valid),
+            error_calc.sample_in.eq(pdh_frontend.error_sample),
+            error_calc.sample_valid.eq(pdh_frontend.error_valid),
             error_calc.offset.eq(0),
             error_calc.setpoint.eq(0),
             error_calc.invert_error.eq(0),
@@ -331,6 +346,7 @@ class LockCoreTop(Elaboratable):
         m.d.comb += [
             self.o_dac_fast.eq(dac_fast_fmt.o_dac),
             self.o_dac_slow.eq(slow_dac_source),
+            self.o_dac_mod.eq(pdh_frontend.mod_out),
             self.lock_state.eq(lock_fsm.state),
             self.lock_fault.eq(lock_fsm.fault_state),
             self.fast_output.eq(dac_fast_fmt.o_dac),
