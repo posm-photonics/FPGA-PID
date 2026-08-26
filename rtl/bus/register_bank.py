@@ -54,6 +54,9 @@ from .register_defs import (
     CTRL_INTEGRATOR_RESET, CTRL_INTEGRATOR_LOAD, CTRL_TRACE_CAPTURE_ENABLE,
     CTRL_AUTOLOCK_ENABLE, CTRL_SLOW_RECENTER_ENABLE,
     CTRL_ADC_TEST_PATTERN_EN, CTRL_DAC_TEST_PATTERN_EN,
+    ADDR_PDH_CONTROL, ADDR_PDH_MOD_FREQ, ADDR_PDH_MOD_AMP,
+    ADDR_PDH_DEMOD_PHASE, ADDR_PDH_LPF_ALPHA,
+    PDH_CTRL_ENABLE
 )
 
 VERSION_ID = 0x0003_0000  # major=3 (matches "Version 3 Draft"), minor=0
@@ -126,6 +129,13 @@ class RegisterBank(Elaboratable):
         self.autolock_slope_sign = Signal(reset=0)
         self.autolock_retry_limit = Signal(8, reset=3)
 
+        # --- PDH configuration hooks ---
+        self.pdh_enable = Signal()
+        self.pdh_mod_freq = Signal(32, reset=0)
+        self.pdh_mod_amp = Signal(16, reset=0)
+        self.pdh_demod_phase = Signal(32, reset=0)
+        self.pdh_lpf_alpha = Signal(5, reset=8)
+
         # --- STATUS: inputs from the rest of the design (comb in) ---
         self.state          = Signal(4)   # from lock_fsm
         self.locked          = Signal()
@@ -148,6 +158,7 @@ class RegisterBank(Elaboratable):
         m = Module()
 
         control      = Signal(32)
+        pdh_control  = Signal(32)
         fault_enable = Signal(self.num_faults)
         fault_sticky = Signal(self.num_faults)
 
@@ -167,6 +178,11 @@ class RegisterBank(Elaboratable):
             self.slow_recenter_enable.eq(control[CTRL_SLOW_RECENTER_ENABLE]),
             self.adc_test_pattern_en.eq(control[CTRL_ADC_TEST_PATTERN_EN]),
             self.dac_test_pattern_en.eq(control[CTRL_DAC_TEST_PATTERN_EN]),
+        ]
+
+        # ---------------- PDH decode (comb) ----------------
+        m.d.comb += [
+            self.pdh_enable.eq(pdh_control[PDH_CTRL_ENABLE]),
         ]
 
         # ---------------- STATUS pack (comb, read-only) ----------------
@@ -218,6 +234,16 @@ class RegisterBank(Elaboratable):
                     m.d.sync += fault_enable.eq(self.dat_w[:self.num_faults])
                 with m.Case(ADDR_DEBUG_SELECT >> 2):
                     m.d.sync += self.debug_select.eq(self.dat_w[:8])
+                with m.Case(ADDR_PDH_CONTROL >> 2):
+                    m.d.sync += pdh_control.eq(self.dat_w)
+                with m.Case(ADDR_PDH_MOD_FREQ >> 2):
+                    m.d.sync += self.pdh_mod_freq.eq(self.dat_w)
+                with m.Case(ADDR_PDH_MOD_AMP >> 2):
+                    m.d.sync += self.pdh_mod_amp.eq(self.dat_w[:16])
+                with m.Case(ADDR_PDH_DEMOD_PHASE >> 2):
+                    m.d.sync += self.pdh_demod_phase.eq(self.dat_w)
+                with m.Case(ADDR_PDH_LPF_ALPHA >> 2):
+                    m.d.sync += self.pdh_lpf_alpha.eq(self.dat_w[:5])
                 # FAULT_CLEAR (write-only) handled combinationally above;
                 # VERSION / STATUS / FAULT_STATUS ignore writes.
 
@@ -244,6 +270,16 @@ class RegisterBank(Elaboratable):
                 m.d.comb += self.dat_r.eq(fault_enable)
             with m.Case(ADDR_DEBUG_SELECT >> 2):
                 m.d.comb += self.dat_r.eq(self.debug_select)
+            with m.Case(ADDR_PDH_CONTROL >> 2):
+                m.d.comb += self.dat_r.eq(pdh_control)
+            with m.Case(ADDR_PDH_MOD_FREQ >> 2):
+                m.d.comb += self.dat_r.eq(self.pdh_mod_freq)
+            with m.Case(ADDR_PDH_MOD_AMP >> 2):
+                m.d.comb += self.dat_r.eq(self.pdh_mod_amp)
+            with m.Case(ADDR_PDH_DEMOD_PHASE >> 2):
+                m.d.comb += self.dat_r.eq(self.pdh_demod_phase)
+            with m.Case(ADDR_PDH_LPF_ALPHA >> 2):
+                m.d.comb += self.dat_r.eq(self.pdh_lpf_alpha)
             with m.Default():
                 m.d.comb += self.dat_r.eq(0)
 
