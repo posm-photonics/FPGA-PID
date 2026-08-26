@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>POSM lock core</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar__brand">POSM <span>/</span> LOCK CORE</div>
+  <div class="topbar__spacer"></div>
+  <span id="badge-sim" class="badge badge--sim" style="display:none;">
+    <span class="led"></span>SIMULATED -- no hardware attached
+  </span>
+  <span id="badge-role" class="badge badge--role-viewer">viewer</span>
+  <span id="badge-connection" class="badge badge--disconnected">
+    <span class="led"></span>connecting...
+  </span>
+</div>
+<div class="conn-progress"></div>
+
+<div class="app-grid">
+  <!-- Control-group tabs. CSS-only: the radios drive :has() rules in
+       style.css, so app.js keeps mounting every panel exactly as it
+       did and nothing here needs a listener. -->
+  <div class="tabbar" role="tablist" aria-label="Control groups">
+    <input type="radio" name="ctlgroup" id="tab-pi" checked>
+    <label for="tab-pi">PI</label>
+    <input type="radio" name="ctlgroup" id="tab-scan">
+    <label for="tab-scan">Scan</label>
+    <input type="radio" name="ctlgroup" id="tab-autolock">
+    <label for="tab-autolock">Auto</label>
+    <input type="radio" name="ctlgroup" id="tab-system">
+    <label for="tab-system">System</label>
+    <input type="radio" name="ctlgroup" id="tab-config">
+    <label for="tab-config">Config</label>
+  </div>
+
+  <div class="app-grid__col" id="col-left"></div>
+  <div class="app-grid__col" id="col-center"></div>
+  <div class="app-grid__col" id="col-right"></div>
+</div>
+
+<div id="error-toast" style="display:none;"></div>
+
+<div class="footer-note">
+  POSM FPGA MTS laser-lock core -- browser client, no install required (see
+  docs/10_gui_implementation_plan.md). Only enable outputs once Status and
+  Fault readback look sane, and never enable the DAC test pattern while
+  connected to a real actuator.
+</div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
