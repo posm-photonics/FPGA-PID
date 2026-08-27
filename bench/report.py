@@ -12,7 +12,7 @@ from typing import Iterable, TextIO
 
 COLUMNS = (
     "architecture", "scenario", "samples", "time_to_lock_s", "overshoot",
-    "settling_time_s", "steady_state_error", "output_noise_rms", "false_trigger_count",
+    "steady_state_error", "output_noise_rms", "false_trigger_count",
 )
 
 

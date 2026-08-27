@@ -41,13 +41,6 @@ def overshoot(result: Result, scenario: Scenario) -> float:
     return max((abs(value) - threshold for _, value in _finite_pairs(result.times, result.error)), default=0.0)
 
 
-def settling_time(result: Result, scenario: Scenario) -> float | None:
-    """Return the time at which the signal first remains within threshold."""
-
-    locked_at = time_to_lock(result, scenario)
-    return None if locked_at is None else max(0.0, locked_at)
-
-
 def steady_state_error(result: Result, scenario: Scenario) -> float:
     """Return RMS error over the final settling window."""
 
@@ -91,7 +84,6 @@ def score_result(result: Result, scenario: Scenario) -> dict[str, Any]:
         "samples": result.sample_count,
         "time_to_lock_s": time_to_lock(result, scenario),
         "overshoot": overshoot(result, scenario),
-        "settling_time_s": settling_time(result, scenario),
         "steady_state_error": steady_state_error(result, scenario),
         "output_noise_rms": output_noise(result, scenario),
         "false_trigger_count": false_trigger_count(result, scenario),
