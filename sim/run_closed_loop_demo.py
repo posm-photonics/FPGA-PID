@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from amaranth import *
-from amaranth.sim import Simulator, Settle, Tick
+from amaranth.sim import Delay, Simulator, Settle, Tick
 
 from rtl.bus.register_defs import (
     ADDR_CONTROL,
@@ -40,6 +40,8 @@ from rtl.bus.register_defs import (
     ADDR_AUTOLOCK_WIDTH_MAX,
     ADDR_AUTOLOCK_SLOPE_SIGN,
     ADDR_AUTOLOCK_RETRY_LIMIT,
+    ADDR_ERROR_CONFIG,
+    ADDR_LOCK_ERROR_MAX,
     ADDR_SLOW_CTRL_CONFIG,
     ADDR_SLOW_RECENTER_TARGET,
     ADDR_SLOW_RECENTER_GAIN,
@@ -112,8 +114,14 @@ class ClosedLoopRunner:
         yield from self._write_reg(self.dut, ADDR_AUTOLOCK_AMP_MIN, 0)
         yield from self._write_reg(self.dut, ADDR_AUTOLOCK_WIDTH_MIN, 50)
         yield from self._write_reg(self.dut, ADDR_AUTOLOCK_WIDTH_MAX, 65535)
-        yield from self._write_reg(self.dut, ADDR_AUTOLOCK_SLOPE_SIGN, 0)
+        # The descriptor describes the expected hardware feature, not the
+        # measured scenario. A wrong-polarity scenario must therefore remain
+        # a negative test instead of teaching autolock to accept the fault.
+        yield from self._write_reg(self.dut, ADDR_AUTOLOCK_SLOPE_SIGN, 1)
         yield from self._write_reg(self.dut, ADDR_AUTOLOCK_RETRY_LIMIT, 3)
+        yield from self._write_reg(self.dut, ADDR_ERROR_CONFIG, 0)
+        yield from self._write_reg(self.dut, ADDR_LOCK_ERROR_MAX,
+                       int(self.config.lock_threshold))
 
         yield from self._write_reg(self.dut, ADDR_SLOW_CTRL_CONFIG,
                                    (1 << CTRL_TRACE_CAPTURE_ENABLE) | (1 << CTRL_AUTOLOCK_ENABLE)
@@ -145,8 +153,12 @@ class ClosedLoopRunner:
                 detuning_adj, adc_sample, fast_adj, slow_adj = self.injector.apply(
                     detuning, measured_error, fast_dac, slow_dac, time_s)
 
-                yield dut.i_adc_ch0.eq(int(round(adc_sample)))
-                yield dut.i_adc_ch1.eq(int(round(adc_sample * 0.5)))
+                # Convert the model's physical error units into the ADC code
+                # range used by the fixed-point RTL. Keep the scale in one
+                # place so lock_error_max remains a meaningful code limit.
+                adc_code = int(round(adc_sample / self.config.adc_scale))
+                yield dut.i_adc_ch0.eq(adc_code)
+                yield dut.i_adc_ch1.eq(int(round(adc_code * 0.5)))
                 yield dut.i_adc_valid.eq(1)
                 yield dut.i_adc_overrange_ch0.eq(0)
                 yield dut.i_adc_overrange_ch1.eq(0)
@@ -187,11 +199,22 @@ class ClosedLoopRunner:
                 yield Tick()
 
         sim = Simulator(self.dut)
-        sim.add_clock(self.config.timing.clock_period_s)
+
+        def clock_process():
+            # Keep the external clock alive for the finite testbench run.
+            # A forever-running process prevents Simulator.run() from
+            # returning after the DUT driver has finished.
+            cycles = self.config.timing.steps + 256
+            for _ in range(cycles):
+                yield self.dut.clk.eq(0)
+                yield Delay(self.config.timing.clock_period_s / 2)
+                yield self.dut.clk.eq(1)
+                yield Delay(self.config.timing.clock_period_s / 2)
 
         def process():
             yield from tb(self.dut)
 
+        sim.add_process(clock_process)
         sim.add_process(process)
         sim.run()
 
