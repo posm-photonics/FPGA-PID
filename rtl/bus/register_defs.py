@@ -88,6 +88,44 @@ TRACE_STAT_READY        = 1
 TRACE_STAT_OVERFLOW     = 2
 
 # ---------------------------------------------------------------------
+# Fast loop / PI controller
+# ---------------------------------------------------------------------
+ADDR_FAST_KP           = 0x020  # R/W  Q3.14 signed gain
+ADDR_FAST_KI           = 0x024  # R/W  Q3.14 signed gain
+ADDR_FAST_OUT_MIN      = 0x028  # R/W  signed DAC lower clamp
+ADDR_FAST_OUT_MAX      = 0x02C  # R/W  signed DAC upper clamp
+ADDR_FAST_OUT_SAFE     = 0x030  # R/W  safe DAC output while faulted
+
+# ---------------------------------------------------------------------
+# Ramp / scan
+# ---------------------------------------------------------------------
+ADDR_RAMP_MIN          = 0x034  # R/W  wide-scan lower bound
+ADDR_RAMP_MAX          = 0x038  # R/W  wide-scan upper bound
+ADDR_RAMP_STEP         = 0x03C  # R/W  ramp step size
+ADDR_RAMP_TICK_DIV     = 0x040  # R/W  scan tick division
+ADDR_RAMP_CENTER       = 0x044  # R/W  zoom center
+ADDR_RAMP_WIDTH        = 0x048  # R/W  zoom half-width
+
+# ---------------------------------------------------------------------
+# Autolock descriptor
+# ---------------------------------------------------------------------
+ADDR_AUTOLOCK_WINDOW_MIN      = 0x04C  # R/W
+ADDR_AUTOLOCK_WINDOW_MAX      = 0x050  # R/W
+ADDR_AUTOLOCK_EXPECTED_MIN_X  = 0x054  # R/W
+ADDR_AUTOLOCK_EXPECTED_MAX_X  = 0x058  # R/W
+ADDR_AUTOLOCK_LOCK_X          = 0x05C  # R/W
+ADDR_AUTOLOCK_AMP_MIN         = 0x060  # R/W signed
+ADDR_AUTOLOCK_WIDTH_MIN       = 0x064  # R/W
+ADDR_AUTOLOCK_WIDTH_MAX       = 0x068  # R/W
+ADDR_AUTOLOCK_SLOPE_SIGN      = 0x06C  # R/W 0/1
+ADDR_AUTOLOCK_RETRY_LIMIT     = 0x070  # R/W
+ADDR_ERROR_CONFIG             = 0x074  # R/W
+ADDR_LOCK_ERROR_MAX           = 0x078  # R/W unsigned magnitude limit
+
+# ERROR_CONFIG bit positions
+ERROR_CFG_INVERT              = 0
+
+# ---------------------------------------------------------------------
 # 11.9 PDH Subsystem
 # ---------------------------------------------------------------------
 ADDR_PDH_CONTROL        = 0x200  # R/W

@@ -17,6 +17,7 @@ from rtl.bus.register_defs import (
     ADDR_SLOW_CTRL_CONFIG,
     ADDR_SLOW_RECENTER_TARGET,
     ADDR_SLOW_RECENTER_GAIN,
+    ADDR_SLOW_SLEW_LIMIT,
     ADDR_SLOW_OUT_MIN,
     ADDR_SLOW_OUT_MAX,
     ADDR_SLOW_OUT_SAFE,
@@ -25,9 +26,8 @@ from rtl.bus.register_defs import (
     ADDR_FAULT_CLEAR,
     CTRL_GLOBAL_ENABLE,
     CTRL_LOCK_ENABLE_REQUEST,
-    CTRL_TRACE_CAPTURE_ENABLE,
-    CTRL_AUTOLOCK_ENABLE,
-    CTRL_SLOW_RECENTER_ENABLE,
+    SLOW_CFG_RECENTER_ENABLE,
+    SLOW_CFG_TICK_DIV_SHIFT,
 )
 
 
@@ -65,11 +65,12 @@ def tb(dut):
     yield from write_reg(dut, ADDR_MODE, 0)
     yield from write_reg(dut, ADDR_TRACE_CONFIG, 1)
     yield from write_reg(dut, ADDR_TRACE_LENGTH, 256)
-    yield from write_reg(dut, ADDR_SLOW_CTRL_CONFIG, (1 << CTRL_TRACE_CAPTURE_ENABLE) 
-            | (1 << CTRL_AUTOLOCK_ENABLE) | (1 << CTRL_SLOW_RECENTER_ENABLE))
+    yield from write_reg(dut, ADDR_SLOW_CTRL_CONFIG,
+                         (1 << SLOW_CFG_RECENTER_ENABLE) | (4 << SLOW_CFG_TICK_DIV_SHIFT))
     yield from write_reg(dut, ADDR_SLOW_BIAS, 0)
     yield from write_reg(dut, ADDR_SLOW_RECENTER_TARGET, 0)
-    yield from write_reg(dut, ADDR_SLOW_RECENTER_GAIN, 64)
+    yield from write_reg(dut, ADDR_SLOW_RECENTER_GAIN, -128)
+    yield from write_reg(dut, ADDR_SLOW_SLEW_LIMIT, 256)
     yield from write_reg(dut, ADDR_SLOW_OUT_MIN, -4096)
     yield from write_reg(dut, ADDR_SLOW_OUT_MAX, 4096)
     yield from write_reg(dut, ADDR_SLOW_OUT_SAFE, 0)
@@ -79,7 +80,7 @@ def tb(dut):
     for idx in range(400):
         scan_code = 1000 + ((idx // 4) % 200) * 20
         sample = model.sample(scan_code, idx)
-        yield dut.i_adc_ch0.eq(sample)
+        yield dut.i_adc_ch0.eq(sample + (1 << 15))
         yield dut.i_adc_valid.eq(1)
         yield dut.i_adc_overrange_ch0.eq(0)
         yield dut.i_adc_overrange_ch1.eq(0)

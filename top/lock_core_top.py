@@ -42,8 +42,8 @@ class LockCoreTop(Elaboratable):
         self.i_feature_selected = Signal()
 
         # Final outputs exposed to the board wrapper.
-        self.o_dac_fast = Signal(16)
-        self.o_dac_slow = Signal(16)
+        self.o_dac_fast = Signal(signed(16))
+        self.o_dac_slow = Signal(signed(16))
         self.o_dac_mod  = Signal(signed(16))  # PDH modulation waveform
 
         # Shared memory-mapped register interface: Software -->(to) FPGA
@@ -63,21 +63,19 @@ class LockCoreTop(Elaboratable):
         # Supervisory status exposed to software and board glue.
         self.lock_state = Signal(4)
         self.lock_fault = Signal()
-        self.fast_output = Signal(16)
-        self.slow_output = Signal(16)
+        self.fast_output = Signal(signed(16))
+        self.slow_output = Signal(signed(16))
         self.trace_ready = Signal()
 
     def elaborate(self, platform):
         m = Module()
 
         # The lock core uses one synchronous clock domain with explicit reset.
-        # NOTE: self.clk/self.rst must be explicitly wired into the domain --
-        # declaring the domain alone does not connect it to anything. Without
-        # this, every m.d.sync assignment in the whole hierarchy resolves to
-        # a net with no real driver (verified by generating Verilog: every
-        # submodule's clk wire came out hardwired to constant 0). This was
-        # invisible in the existing testbenches because Amaranth's simulator
-        # drives the "sync" domain by name directly, bypassing this port.
+        # In Amaranth, the domain is created on its own and then externally
+        # driven by the simulator or the board wrapper. Connecting the domain
+        # clock to `self.clk` combinationally creates a driver conflict; the
+        # board wrapper handles the actual external clock connection at the
+        # module boundary instead.
         m.domains.sync = ClockDomain()
         m.d.comb += [
             ClockSignal("sync").eq(self.clk),
@@ -167,14 +165,21 @@ class LockCoreTop(Elaboratable):
         # Wiring the PDH error output to the error calculator.
         pi_load_value = Signal(signed(40))
         lock_quality_ok = Signal()
+        error_magnitude = Signal(24)
         m.d.comb += [
             error_calc.sample_in.eq(pdh_frontend.error_sample),
             error_calc.sample_valid.eq(pdh_frontend.error_valid),
             error_calc.offset.eq(0),
             error_calc.setpoint.eq(0),
-            error_calc.invert_error.eq(0),
+            error_calc.invert_error.eq(reg_bank.error_invert),
             pi_load_value.eq(Cat(autolock.slow_lock_position, Const(0, 24)).as_signed()),
-            lock_quality_ok.eq(adc_frontend.o_valid & ~output_limiter.o_sat & ~fault_source),
+            error_magnitude.eq(Mux(error_calc.error_out[-1], -error_calc.error_out, error_calc.error_out)),
+            lock_quality_ok.eq(
+                adc_frontend.o_valid
+                & (error_magnitude <= reg_bank.lock_error_max)
+                & ~output_limiter.o_sat
+                & ~fault_source
+            ),
         ]
 
         # Implemented in this integration:
@@ -240,7 +245,6 @@ class LockCoreTop(Elaboratable):
                 | (lock_fsm.state == LockState.TRACE_READY)
                 | (lock_fsm.state == LockState.ZOOM_SCAN)
                 | (lock_fsm.state == LockState.FEATURE_VERIFY)
-                | (lock_fsm.state == LockState.ARM_LOCK)
                 | (lock_fsm.state == LockState.RELOCK_SCAN)
             ),
             slow_dac_source.eq(Mux(scan_path_active, ramp_scan.ramp_out, slow_recenter.slow_out)),

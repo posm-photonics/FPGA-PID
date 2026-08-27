@@ -126,7 +126,7 @@ class SlowRecenter(Elaboratable):
         out_min    = Signal(signed(dac_w))
         out_max    = Signal(signed(dac_w))
         out_safe   = Signal(signed(dac_w))
-        slew_limit = Signal(dac_w)  # unsigned magnitude
+        slew_limit = Signal(dac_w, reset=256)  # unsigned magnitude
 
         accumulator  = Signal(signed(accum_w))
         slow_current = Signal(signed(dac_w))

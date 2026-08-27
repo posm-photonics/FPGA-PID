@@ -151,6 +151,19 @@ class RobustAutoLock(Elaboratable):
         # Measured values
         amplitude = Signal(signed(25))
         width = Signal(17)
+        measured_amplitude = Signal(signed(25))
+        measured_width = Signal(17)
+
+        m.d.comb += [
+            measured_amplitude.eq(max_value - min_value),
+            measured_width.eq(
+                Mux(
+                    max_position >= min_position,
+                    max_position - min_position,
+                    min_position - max_position,
+                )
+            ),
+        ]
 
         # Main FSM
         with m.If(self.rst):
@@ -210,7 +223,7 @@ class RobustAutoLock(Elaboratable):
             # --------------------------------------------------------
             # TRACK
             # --------------------------------------------------------
-            with m.If(state == AutoLockState.TRACK):
+            with m.Elif(state == AutoLockState.TRACK):
                 m.d.sync += self.busy.eq(1)
 
                 with m.If(self.scan_valid):
@@ -261,31 +274,23 @@ class RobustAutoLock(Elaboratable):
             # --------------------------------------------------------
             # CHECK
             # --------------------------------------------------------
-            with m.If(state == AutoLockState.CHECK):
+            with m.Elif(state == AutoLockState.CHECK):
 
                 m.d.sync += [
-                    amplitude.eq(max_value - min_value),
-
-                    width.eq(
-                        Mux(
-                            max_position >= min_position,
-                            max_position-min_position,
-                            min_position-max_position
-                        )
-                    )
-
+                    amplitude.eq(measured_amplitude),
+                    width.eq(measured_width),
                 ]
 
 
                 # Verification
                 with m.If(
                     # amplitude
-                    (amplitude >= self.amp_min)
+                    (measured_amplitude >= self.amp_min)
                     &
                     # width
-                    (width >= self.width_min)
+                    (measured_width >= self.width_min)
                     &
-                    (width <= self.width_max)
+                    (measured_width <= self.width_max)
                     &
                     # slope
                     Mux(
@@ -307,7 +312,7 @@ class RobustAutoLock(Elaboratable):
             # --------------------------------------------------------
             # SUCCESS
             # --------------------------------------------------------
-            with m.If(state == AutoLockState.SUCCESS):
+            with m.Elif(state == AutoLockState.SUCCESS):
 
                 m.d.sync += [
                     self.feature_match.eq(1),
@@ -327,7 +332,7 @@ class RobustAutoLock(Elaboratable):
             # --------------------------------------------------------
             # RETRY
             # --------------------------------------------------------
-            with m.If(state == AutoLockState.RETRY):
+            with m.Elif(state == AutoLockState.RETRY):
                 with m.If(self.retry_count < self.retry_limit):
                     m.d.sync += [
                         self.retry_count.eq(self.retry_count + 1),
@@ -343,7 +348,7 @@ class RobustAutoLock(Elaboratable):
             # --------------------------------------------------------
             # FAIL
             # --------------------------------------------------------
-            with m.If(state == AutoLockState.FAIL):
+            with m.Elif(state == AutoLockState.FAIL):
                 m.d.sync += [
                     self.feature_failed.eq(1),
                     state.eq(AutoLockState.IDLE)

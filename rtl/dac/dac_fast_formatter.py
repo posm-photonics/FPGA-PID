@@ -46,17 +46,21 @@ class DACFastFormatter(Elaboratable):
             with m.If(self.i_mode):
                 # offset binary
                 m.d.sync += formatted.eq(scaled + (1 << (self.DAC_WIDTH - 1)))
+
+                # Offset-binary values are unsigned and can be clamped in
+                # the normal numeric domain.
+                with m.If(formatted > dac_max):
+                    m.d.sync += self.o_dac.eq(dac_max)
+                with m.Elif(formatted < dac_min):
+                    m.d.sync += self.o_dac.eq(dac_min)
+                with m.Else():
+                    m.d.sync += self.o_dac.eq(formatted)
             with m.Else():
                 # two's complement
-                m.d.sync += formatted.eq(scaled)
-
-            # clamp
-            with m.If(formatted > dac_max):
-                m.d.sync += self.o_dac.eq(dac_max)
-            with m.Elif(formatted < dac_min):
-                m.d.sync += self.o_dac.eq(dac_min)
-            with m.Else():
-                m.d.sync += self.o_dac.eq(formatted)
+                # Preserve the signed bit pattern. Comparing this value as
+                # unsigned would turn every negative command into a false
+                # high-side clamp.
+                m.d.sync += self.o_dac.eq(scaled[:self.DAC_WIDTH])
 
             m.d.sync += self.o_valid.eq(1)
 

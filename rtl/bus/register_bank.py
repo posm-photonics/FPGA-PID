@@ -54,6 +54,15 @@ from .register_defs import (
     CTRL_INTEGRATOR_RESET, CTRL_INTEGRATOR_LOAD, CTRL_TRACE_CAPTURE_ENABLE,
     CTRL_AUTOLOCK_ENABLE, CTRL_SLOW_RECENTER_ENABLE,
     CTRL_ADC_TEST_PATTERN_EN, CTRL_DAC_TEST_PATTERN_EN,
+    ADDR_FAST_KP, ADDR_FAST_KI, ADDR_FAST_OUT_MIN, ADDR_FAST_OUT_MAX,
+    ADDR_FAST_OUT_SAFE, ADDR_RAMP_MIN, ADDR_RAMP_MAX, ADDR_RAMP_STEP,
+    ADDR_RAMP_TICK_DIV, ADDR_RAMP_CENTER, ADDR_RAMP_WIDTH,
+    ADDR_AUTOLOCK_WINDOW_MIN, ADDR_AUTOLOCK_WINDOW_MAX,
+    ADDR_AUTOLOCK_EXPECTED_MIN_X, ADDR_AUTOLOCK_EXPECTED_MAX_X,
+    ADDR_AUTOLOCK_LOCK_X, ADDR_AUTOLOCK_AMP_MIN, ADDR_AUTOLOCK_WIDTH_MIN,
+    ADDR_AUTOLOCK_WIDTH_MAX, ADDR_AUTOLOCK_SLOPE_SIGN,
+    ADDR_AUTOLOCK_RETRY_LIMIT,
+    ADDR_ERROR_CONFIG, ADDR_LOCK_ERROR_MAX, ERROR_CFG_INVERT,
     ADDR_PDH_CONTROL, ADDR_PDH_MOD_FREQ, ADDR_PDH_MOD_AMP,
     ADDR_PDH_DEMOD_PHASE, ADDR_PDH_LPF_ALPHA,
     PDH_CTRL_ENABLE
@@ -128,6 +137,8 @@ class RegisterBank(Elaboratable):
         self.autolock_width_max = Signal(16, reset=65535)
         self.autolock_slope_sign = Signal(reset=0)
         self.autolock_retry_limit = Signal(8, reset=3)
+        self.error_invert = Signal(reset=0)
+        self.lock_error_max = Signal(24, reset=25)
 
         # --- PDH configuration hooks ---
         self.pdh_enable = Signal()
@@ -158,6 +169,7 @@ class RegisterBank(Elaboratable):
         m = Module()
 
         control      = Signal(32)
+        error_config = Signal(32)
         pdh_control  = Signal(32)
         fault_enable = Signal(self.num_faults)
         fault_sticky = Signal(self.num_faults)
@@ -178,6 +190,7 @@ class RegisterBank(Elaboratable):
             self.slow_recenter_enable.eq(control[CTRL_SLOW_RECENTER_ENABLE]),
             self.adc_test_pattern_en.eq(control[CTRL_ADC_TEST_PATTERN_EN]),
             self.dac_test_pattern_en.eq(control[CTRL_DAC_TEST_PATTERN_EN]),
+            self.error_invert.eq(error_config[ERROR_CFG_INVERT]),
         ]
 
         # ---------------- PDH decode (comb) ----------------
@@ -234,6 +247,52 @@ class RegisterBank(Elaboratable):
                     m.d.sync += fault_enable.eq(self.dat_w[:self.num_faults])
                 with m.Case(ADDR_DEBUG_SELECT >> 2):
                     m.d.sync += self.debug_select.eq(self.dat_w[:8])
+                with m.Case(ADDR_FAST_KP >> 2):
+                    m.d.sync += self.fast_kp.eq(self.dat_w[:18].as_signed())
+                with m.Case(ADDR_FAST_KI >> 2):
+                    m.d.sync += self.fast_ki.eq(self.dat_w[:18].as_signed())
+                with m.Case(ADDR_FAST_OUT_MIN >> 2):
+                    m.d.sync += self.fast_out_min.eq(self.dat_w[:16].as_signed())
+                with m.Case(ADDR_FAST_OUT_MAX >> 2):
+                    m.d.sync += self.fast_out_max.eq(self.dat_w[:16].as_signed())
+                with m.Case(ADDR_FAST_OUT_SAFE >> 2):
+                    m.d.sync += self.fast_out_safe.eq(self.dat_w[:16].as_signed())
+                with m.Case(ADDR_RAMP_MIN >> 2):
+                    m.d.sync += self.ramp_min.eq(self.dat_w[:16].as_signed())
+                with m.Case(ADDR_RAMP_MAX >> 2):
+                    m.d.sync += self.ramp_max.eq(self.dat_w[:16].as_signed())
+                with m.Case(ADDR_RAMP_STEP >> 2):
+                    m.d.sync += self.ramp_step.eq(self.dat_w[:16])
+                with m.Case(ADDR_RAMP_TICK_DIV >> 2):
+                    m.d.sync += self.ramp_tick_div.eq(self.dat_w[:16])
+                with m.Case(ADDR_RAMP_CENTER >> 2):
+                    m.d.sync += self.ramp_center.eq(self.dat_w[:16].as_signed())
+                with m.Case(ADDR_RAMP_WIDTH >> 2):
+                    m.d.sync += self.ramp_width.eq(self.dat_w[:16])
+                with m.Case(ADDR_AUTOLOCK_WINDOW_MIN >> 2):
+                    m.d.sync += self.autolock_window_min.eq(self.dat_w[:16])
+                with m.Case(ADDR_AUTOLOCK_WINDOW_MAX >> 2):
+                    m.d.sync += self.autolock_window_max.eq(self.dat_w[:16])
+                with m.Case(ADDR_AUTOLOCK_EXPECTED_MIN_X >> 2):
+                    m.d.sync += self.autolock_expected_min_x.eq(self.dat_w[:16])
+                with m.Case(ADDR_AUTOLOCK_EXPECTED_MAX_X >> 2):
+                    m.d.sync += self.autolock_expected_max_x.eq(self.dat_w[:16])
+                with m.Case(ADDR_AUTOLOCK_LOCK_X >> 2):
+                    m.d.sync += self.autolock_lock_x.eq(self.dat_w[:16])
+                with m.Case(ADDR_AUTOLOCK_AMP_MIN >> 2):
+                    m.d.sync += self.autolock_amp_min.eq(self.dat_w[:24].as_signed())
+                with m.Case(ADDR_AUTOLOCK_WIDTH_MIN >> 2):
+                    m.d.sync += self.autolock_width_min.eq(self.dat_w[:16])
+                with m.Case(ADDR_AUTOLOCK_WIDTH_MAX >> 2):
+                    m.d.sync += self.autolock_width_max.eq(self.dat_w[:16])
+                with m.Case(ADDR_AUTOLOCK_SLOPE_SIGN >> 2):
+                    m.d.sync += self.autolock_slope_sign.eq(self.dat_w[0])
+                with m.Case(ADDR_AUTOLOCK_RETRY_LIMIT >> 2):
+                    m.d.sync += self.autolock_retry_limit.eq(self.dat_w[:8])
+                with m.Case(ADDR_ERROR_CONFIG >> 2):
+                    m.d.sync += error_config.eq(self.dat_w)
+                with m.Case(ADDR_LOCK_ERROR_MAX >> 2):
+                    m.d.sync += self.lock_error_max.eq(self.dat_w[:24])
                 with m.Case(ADDR_PDH_CONTROL >> 2):
                     m.d.sync += pdh_control.eq(self.dat_w)
                 with m.Case(ADDR_PDH_MOD_FREQ >> 2):
@@ -270,6 +329,10 @@ class RegisterBank(Elaboratable):
                 m.d.comb += self.dat_r.eq(fault_enable)
             with m.Case(ADDR_DEBUG_SELECT >> 2):
                 m.d.comb += self.dat_r.eq(self.debug_select)
+            with m.Case(ADDR_ERROR_CONFIG >> 2):
+                m.d.comb += self.dat_r.eq(error_config)
+            with m.Case(ADDR_LOCK_ERROR_MAX >> 2):
+                m.d.comb += self.dat_r.eq(self.lock_error_max)
             with m.Case(ADDR_PDH_CONTROL >> 2):
                 m.d.comb += self.dat_r.eq(pdh_control)
             with m.Case(ADDR_PDH_MOD_FREQ >> 2):

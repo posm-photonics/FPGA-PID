@@ -257,7 +257,7 @@ class LockFSM(Elaboratable):
 
         with m.Elif(state == LockState.WIDE_SCAN):
 
-            with m.If(self.trace_ready):
+            with m.If(self.trace_ready | self.feature_selected):
                 m.d.sync += state.eq(
                     LockState.TRACE_READY
                 )

@@ -264,6 +264,11 @@ _register_all([
          "Expected sign of the feature's slope (0/1)", width=1, min_value=0, max_value=1),
     _reg("autolock_retry_limit", R.ADDR_AUTOLOCK_RETRY_LIMIT, "autolock",
          "Number of relock attempts before giving up to FAULT", width=8, min_value=0, max_value=255),
+    _bit("error_invert", R.ADDR_ERROR_CONFIG, 0, "fast_loop",
+         "Invert the signed error before the PI controller"),
+    _reg("lock_error_max", R.ADDR_LOCK_ERROR_MAX, "fast_loop",
+         "Maximum absolute error accepted by the hardware lock-quality check",
+         width=24, min_value=0, max_value=(1 << 24) - 1),
 ])
 
 # ---------------------------------------------------------------------
