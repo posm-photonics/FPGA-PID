@@ -77,6 +77,10 @@ class LockCoreTop(Elaboratable):
         # board wrapper handles the actual external clock connection at the
         # module boundary instead.
         m.domains.sync = ClockDomain()
+        m.d.comb += [
+            ClockSignal("sync").eq(self.clk),
+            ResetSignal("sync").eq(self.rst),
+        ]
 
         # Submodules are instantiated explicitly so the hierarchy is visible.
         # ADCFrontendTop owns the ADC formatting, validity checks, and fault
@@ -161,14 +165,21 @@ class LockCoreTop(Elaboratable):
         # Wiring the PDH error output to the error calculator.
         pi_load_value = Signal(signed(40))
         lock_quality_ok = Signal()
+        error_magnitude = Signal(24)
         m.d.comb += [
             error_calc.sample_in.eq(pdh_frontend.error_sample),
             error_calc.sample_valid.eq(pdh_frontend.error_valid),
             error_calc.offset.eq(0),
             error_calc.setpoint.eq(0),
-            error_calc.invert_error.eq(0),
+            error_calc.invert_error.eq(reg_bank.error_invert),
             pi_load_value.eq(Cat(autolock.slow_lock_position, Const(0, 24)).as_signed()),
-            lock_quality_ok.eq(adc_frontend.o_valid & ~output_limiter.o_sat & ~fault_source),
+            error_magnitude.eq(Mux(error_calc.error_out[-1], -error_calc.error_out, error_calc.error_out)),
+            lock_quality_ok.eq(
+                adc_frontend.o_valid
+                & (error_magnitude <= reg_bank.lock_error_max)
+                & ~output_limiter.o_sat
+                & ~fault_source
+            ),
         ]
 
         # Implemented in this integration:

@@ -62,6 +62,7 @@ from .register_defs import (
     ADDR_AUTOLOCK_LOCK_X, ADDR_AUTOLOCK_AMP_MIN, ADDR_AUTOLOCK_WIDTH_MIN,
     ADDR_AUTOLOCK_WIDTH_MAX, ADDR_AUTOLOCK_SLOPE_SIGN,
     ADDR_AUTOLOCK_RETRY_LIMIT,
+    ADDR_ERROR_CONFIG, ADDR_LOCK_ERROR_MAX, ERROR_CFG_INVERT,
     ADDR_PDH_CONTROL, ADDR_PDH_MOD_FREQ, ADDR_PDH_MOD_AMP,
     ADDR_PDH_DEMOD_PHASE, ADDR_PDH_LPF_ALPHA,
     PDH_CTRL_ENABLE
@@ -136,6 +137,8 @@ class RegisterBank(Elaboratable):
         self.autolock_width_max = Signal(16, reset=65535)
         self.autolock_slope_sign = Signal(reset=0)
         self.autolock_retry_limit = Signal(8, reset=3)
+        self.error_invert = Signal(reset=0)
+        self.lock_error_max = Signal(24, reset=25)
 
         # --- PDH configuration hooks ---
         self.pdh_enable = Signal()
@@ -166,6 +169,7 @@ class RegisterBank(Elaboratable):
         m = Module()
 
         control      = Signal(32)
+        error_config = Signal(32)
         pdh_control  = Signal(32)
         fault_enable = Signal(self.num_faults)
         fault_sticky = Signal(self.num_faults)
@@ -186,6 +190,7 @@ class RegisterBank(Elaboratable):
             self.slow_recenter_enable.eq(control[CTRL_SLOW_RECENTER_ENABLE]),
             self.adc_test_pattern_en.eq(control[CTRL_ADC_TEST_PATTERN_EN]),
             self.dac_test_pattern_en.eq(control[CTRL_DAC_TEST_PATTERN_EN]),
+            self.error_invert.eq(error_config[ERROR_CFG_INVERT]),
         ]
 
         # ---------------- PDH decode (comb) ----------------
@@ -284,6 +289,10 @@ class RegisterBank(Elaboratable):
                     m.d.sync += self.autolock_slope_sign.eq(self.dat_w[0])
                 with m.Case(ADDR_AUTOLOCK_RETRY_LIMIT >> 2):
                     m.d.sync += self.autolock_retry_limit.eq(self.dat_w[:8])
+                with m.Case(ADDR_ERROR_CONFIG >> 2):
+                    m.d.sync += error_config.eq(self.dat_w)
+                with m.Case(ADDR_LOCK_ERROR_MAX >> 2):
+                    m.d.sync += self.lock_error_max.eq(self.dat_w[:24])
                 with m.Case(ADDR_PDH_CONTROL >> 2):
                     m.d.sync += pdh_control.eq(self.dat_w)
                 with m.Case(ADDR_PDH_MOD_FREQ >> 2):
@@ -320,6 +329,10 @@ class RegisterBank(Elaboratable):
                 m.d.comb += self.dat_r.eq(fault_enable)
             with m.Case(ADDR_DEBUG_SELECT >> 2):
                 m.d.comb += self.dat_r.eq(self.debug_select)
+            with m.Case(ADDR_ERROR_CONFIG >> 2):
+                m.d.comb += self.dat_r.eq(error_config)
+            with m.Case(ADDR_LOCK_ERROR_MAX >> 2):
+                m.d.comb += self.dat_r.eq(self.lock_error_max)
             with m.Case(ADDR_PDH_CONTROL >> 2):
                 m.d.comb += self.dat_r.eq(pdh_control)
             with m.Case(ADDR_PDH_MOD_FREQ >> 2):

@@ -43,7 +43,12 @@ HERE = Path(__file__).resolve().parent
 CLIENT_DIR = HERE.parent / "client"
 CONFIG_DIR = HERE / "configs"
 
-sys.path.insert(0, str(HERE.parent.parent))  # repo root, for `rtl.*` / `sim.*` imports
+# Make both the GUI package and the repository RTL packages importable no
+# matter whether this module is launched from the repo root or UI/Interface.
+GUI_ROOT = HERE.parent.parent
+REPO_ROOT = HERE.parents[4]
+sys.path.insert(0, str(GUI_ROOT))
+sys.path.insert(0, str(REPO_ROOT))
 
 from gui.server import parameters as P  # noqa: E402
 from gui.server import protocol as PROTO  # noqa: E402
@@ -515,10 +520,30 @@ def main():
 
     posm = PosmServer(backend, host=args.host, port=args.port,
                        single_control=not args.multi_control, sim_mode=sim_mode)
-    posm.start()
+    try:
+        server = ThreadingHTTPServer((args.host, args.port), make_handler(posm))
+    except OSError as exc:
+        if exc.errno != 98 or args.port != 8000:
+            raise
+        # A previous local GUI session commonly still owns the default port.
+        # Keep startup convenient while preserving an explicitly requested
+        # non-default port as a hard error.
+        for candidate in range(8001, 8100):
+            try:
+                server = ThreadingHTTPServer((args.host, candidate), make_handler(posm))
+                args.port = candidate
+                print(f"Port 8000 is busy; using port {candidate} instead.")
+                break
+            except OSError as candidate_error:
+                if candidate_error.errno != 98:
+                    raise
+        else:
+            raise
 
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(posm))
-    print(f"Serving POSM GUI on http://{args.host}:{args.port}/  (WebSocket at /ws)")
+    posm.port = args.port
+    posm.start()
+    display_host = "localhost" if args.host in ("0.0.0.0", "::") else args.host
+    print(f"Serving POSM GUI on http://{display_host}:{args.port}/  (WebSocket at /ws)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

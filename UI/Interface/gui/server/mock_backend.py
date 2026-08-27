@@ -33,9 +33,11 @@ import time
 from pathlib import Path
 from typing import Optional
 
-ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+GUI_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[4]
+for import_root in (GUI_ROOT, REPO_ROOT):
+    if str(import_root) not in sys.path:
+        sys.path.insert(0, str(import_root))
 
 from amaranth.sim import Simulator  # noqa: E402
 
@@ -162,8 +164,9 @@ class MockBackend:
             _, adc_sample, _, _ = self.injector.apply(
                 detuning, measured_error, fast_dac, slow_dac, self.sim_time_s)
 
-            ctx.set(dut.i_adc_ch0, int(round(adc_sample)) & 0xFFFF)
-            ctx.set(dut.i_adc_ch1, int(round(adc_sample * 0.5)) & 0xFFFF)
+            adc_code = int(round(adc_sample / self.sim_config.adc_scale))
+            ctx.set(dut.i_adc_ch0, adc_code & 0xFFFF)
+            ctx.set(dut.i_adc_ch1, int(round(adc_code * 0.5)) & 0xFFFF)
             ctx.set(dut.i_adc_valid, 1)
             ctx.set(dut.i_adc_overrange_ch0, 0)
             ctx.set(dut.i_adc_overrange_ch1, 0)

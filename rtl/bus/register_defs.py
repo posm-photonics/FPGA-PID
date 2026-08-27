@@ -119,6 +119,11 @@ ADDR_AUTOLOCK_WIDTH_MIN       = 0x064  # R/W
 ADDR_AUTOLOCK_WIDTH_MAX       = 0x068  # R/W
 ADDR_AUTOLOCK_SLOPE_SIGN      = 0x06C  # R/W 0/1
 ADDR_AUTOLOCK_RETRY_LIMIT     = 0x070  # R/W
+ADDR_ERROR_CONFIG             = 0x074  # R/W
+ADDR_LOCK_ERROR_MAX           = 0x078  # R/W unsigned magnitude limit
+
+# ERROR_CONFIG bit positions
+ERROR_CFG_INVERT              = 0
 
 # ---------------------------------------------------------------------
 # 11.9 PDH Subsystem

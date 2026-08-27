@@ -9,7 +9,7 @@ both the WebSocket API and the static browser client.
 
 ```bash
 pip install amaranth --break-system-packages   # only needed for --mock
-python3 -m gui.server.posm_server --mock --port 8000
+python3 run_gui.py --mock --port 8000
 ```
 
 Open `http://localhost:8000/` in a browser. You'll see a `SIMULATED`
@@ -30,7 +30,7 @@ near real hardware).
 ## Real hardware
 
 ```bash
-sudo python3 -m gui.server.posm_server --base 0x40600000 --port 8000
+sudo python3 run_gui.py --base 0x40600000 --port 8000
 ```
 
 `--base` must match wherever `red_pitaya_lock_core` is actually wired
