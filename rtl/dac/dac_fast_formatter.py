@@ -37,6 +37,10 @@ class DACFastFormatter(Elaboratable):
 
         dac_max = (1 << self.DAC_WIDTH) - 1 # max = (1 << n) − 1
         dac_min = 0 # dac is unsigned
+        
+        # Two's complement signed bounds: range is -(2^(DAC_WIDTH-1)) to 2^(DAC_WIDTH-1)-1
+        dac_max_signed = (1 << (self.DAC_WIDTH - 1)) - 1      # 32767 for 16-bit
+        dac_min_signed = -(1 << (self.DAC_WIDTH - 1))         # -32768 for 16-bit
 
         with m.If(self.i_valid):
             # scale back before sending the output. In case we had to add 
@@ -57,10 +61,17 @@ class DACFastFormatter(Elaboratable):
                     m.d.sync += self.o_dac.eq(formatted)
             with m.Else():
                 # two's complement
-                # Preserve the signed bit pattern. Comparing this value as
-                # unsigned would turn every negative command into a false
-                # high-side clamp.
-                m.d.sync += self.o_dac.eq(scaled[:self.DAC_WIDTH])
+                # RECOMMENDED FIX: changed from truncation to saturation.
+                # Previously just took lower 16 bits (scaled[:DAC_WIDTH]) which would
+                # wrap-around on overflow. Now clamps scaled value to valid signed range
+                # before conversion to DAC code, matching the pattern in offset-binary
+                # branch and preventing discontinuous jumps on overflow.
+                with m.If(scaled > dac_max_signed):
+                    m.d.sync += self.o_dac.eq(dac_max_signed[:self.DAC_WIDTH])
+                with m.Elif(scaled < dac_min_signed):
+                    m.d.sync += self.o_dac.eq(dac_min_signed[:self.DAC_WIDTH])
+                with m.Else():
+                    m.d.sync += self.o_dac.eq(scaled[:self.DAC_WIDTH])
 
             m.d.sync += self.o_valid.eq(1)
 
