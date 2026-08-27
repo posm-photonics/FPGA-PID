@@ -19,7 +19,27 @@ from rtl.bus.register_defs import (
     ADDR_CONTROL,
     ADDR_MODE,
     ADDR_TRACE_CONFIG,
+    ADDR_TRACE_START,
     ADDR_TRACE_LENGTH,
+    ADDR_FAST_KP,
+    ADDR_FAST_KI,
+    ADDR_FAST_OUT_MIN,
+    ADDR_FAST_OUT_MAX,
+    ADDR_FAST_OUT_SAFE,
+    ADDR_RAMP_MIN,
+    ADDR_RAMP_MAX,
+    ADDR_RAMP_STEP,
+    ADDR_RAMP_TICK_DIV,
+    ADDR_RAMP_CENTER,
+    ADDR_RAMP_WIDTH,
+    ADDR_AUTOLOCK_WINDOW_MIN,
+    ADDR_AUTOLOCK_WINDOW_MAX,
+    ADDR_AUTOLOCK_LOCK_X,
+    ADDR_AUTOLOCK_AMP_MIN,
+    ADDR_AUTOLOCK_WIDTH_MIN,
+    ADDR_AUTOLOCK_WIDTH_MAX,
+    ADDR_AUTOLOCK_SLOPE_SIGN,
+    ADDR_AUTOLOCK_RETRY_LIMIT,
     ADDR_SLOW_CTRL_CONFIG,
     ADDR_SLOW_RECENTER_TARGET,
     ADDR_SLOW_RECENTER_GAIN,
@@ -70,6 +90,31 @@ class ClosedLoopRunner:
         yield from self._write_reg(self.dut, ADDR_MODE, 0)
         yield from self._write_reg(self.dut, ADDR_TRACE_CONFIG, 1)
         yield from self._write_reg(self.dut, ADDR_TRACE_LENGTH, 256)
+        yield from self._write_reg(self.dut, ADDR_TRACE_START, 1)
+
+        # Seed the fast loop and autolock configuration that the FSM depends on.
+        # Without these values, the PI gains remain zero and the autolock feature
+        # thresholds stay at their default zero values, which stalls the lock FSM.
+        yield from self._write_reg(self.dut, ADDR_FAST_KP, -32768)
+        yield from self._write_reg(self.dut, ADDR_FAST_KI, -8192)
+        yield from self._write_reg(self.dut, ADDR_FAST_OUT_MIN, -4096)
+        yield from self._write_reg(self.dut, ADDR_FAST_OUT_MAX, 4096)
+        yield from self._write_reg(self.dut, ADDR_FAST_OUT_SAFE, 0)
+        yield from self._write_reg(self.dut, ADDR_RAMP_MIN, -5000)
+        yield from self._write_reg(self.dut, ADDR_RAMP_MAX, 5000)
+        yield from self._write_reg(self.dut, ADDR_RAMP_STEP, 200)
+        yield from self._write_reg(self.dut, ADDR_RAMP_TICK_DIV, 1)
+        yield from self._write_reg(self.dut, ADDR_RAMP_CENTER, 0)
+        yield from self._write_reg(self.dut, ADDR_RAMP_WIDTH, 2000)
+        yield from self._write_reg(self.dut, ADDR_AUTOLOCK_WINDOW_MIN, 0)
+        yield from self._write_reg(self.dut, ADDR_AUTOLOCK_WINDOW_MAX, 5000)
+        yield from self._write_reg(self.dut, ADDR_AUTOLOCK_LOCK_X, 0)
+        yield from self._write_reg(self.dut, ADDR_AUTOLOCK_AMP_MIN, 0)
+        yield from self._write_reg(self.dut, ADDR_AUTOLOCK_WIDTH_MIN, 50)
+        yield from self._write_reg(self.dut, ADDR_AUTOLOCK_WIDTH_MAX, 65535)
+        yield from self._write_reg(self.dut, ADDR_AUTOLOCK_SLOPE_SIGN, 0)
+        yield from self._write_reg(self.dut, ADDR_AUTOLOCK_RETRY_LIMIT, 3)
+
         yield from self._write_reg(self.dut, ADDR_SLOW_CTRL_CONFIG,
                                    (1 << CTRL_TRACE_CAPTURE_ENABLE) | (1 << CTRL_AUTOLOCK_ENABLE)
                                    | (1 << CTRL_SLOW_RECENTER_ENABLE))
@@ -106,7 +151,7 @@ class ClosedLoopRunner:
                 yield dut.i_adc_overrange_ch0.eq(0)
                 yield dut.i_adc_overrange_ch1.eq(0)
                 yield dut.i_external_interlock.eq(0)
-                yield dut.i_feature_selected.eq(step > 100)
+                yield dut.i_feature_selected.eq(step > 10)
                 yield Tick()
                 yield Settle()
 

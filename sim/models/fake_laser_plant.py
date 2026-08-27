@@ -84,10 +84,8 @@ class FakeLaserPlant:
         slow_code = float(slow_code)
         fast_code = self._clip(fast_code, self.fast_min, self.fast_max)
         slow_code = self._clip(slow_code, self.slow_min, self.slow_max)
-        fast_norm = (fast_code - self.fast_min) / (self.fast_max - self.fast_min + 1e-9)
-        slow_norm = (slow_code - self.slow_min) / (self.slow_max - self.slow_min + 1e-9)
-        fast_target = self.fast_gain * fast_norm
-        slow_target = self.slow_gain * slow_norm
+        fast_target = self.fast_gain * fast_code * 0.001
+        slow_target = self.slow_gain * slow_code * 0.001
 
         self.fast_state += (fast_target - self.fast_state) * (self.timestep / self.tau)
         self.slow_state += (slow_target - self.slow_state) * (self.timestep / self.tau)

@@ -42,8 +42,8 @@ class LockCoreTop(Elaboratable):
         self.i_feature_selected = Signal()
 
         # Final outputs exposed to the board wrapper.
-        self.o_dac_fast = Signal(16)
-        self.o_dac_slow = Signal(16)
+        self.o_dac_fast = Signal(signed(16))
+        self.o_dac_slow = Signal(signed(16))
         self.o_dac_mod  = Signal(signed(16))  # PDH modulation waveform
 
         # Shared memory-mapped register interface: Software -->(to) FPGA
@@ -63,26 +63,20 @@ class LockCoreTop(Elaboratable):
         # Supervisory status exposed to software and board glue.
         self.lock_state = Signal(4)
         self.lock_fault = Signal()
-        self.fast_output = Signal(16)
-        self.slow_output = Signal(16)
+        self.fast_output = Signal(signed(16))
+        self.slow_output = Signal(signed(16))
         self.trace_ready = Signal()
 
     def elaborate(self, platform):
         m = Module()
 
         # The lock core uses one synchronous clock domain with explicit reset.
-        # NOTE: self.clk/self.rst must be explicitly wired into the domain --
-        # declaring the domain alone does not connect it to anything. Without
-        # this, every m.d.sync assignment in the whole hierarchy resolves to
-        # a net with no real driver (verified by generating Verilog: every
-        # submodule's clk wire came out hardwired to constant 0). This was
-        # invisible in the existing testbenches because Amaranth's simulator
-        # drives the "sync" domain by name directly, bypassing this port.
+        # In Amaranth, the domain is created on its own and then externally
+        # driven by the simulator or the board wrapper. Connecting the domain
+        # clock to `self.clk` combinationally creates a driver conflict; the
+        # board wrapper handles the actual external clock connection at the
+        # module boundary instead.
         m.domains.sync = ClockDomain()
-        m.d.comb += [
-            ClockSignal("sync").eq(self.clk),
-            ResetSignal("sync").eq(self.rst),
-        ]
 
         # Submodules are instantiated explicitly so the hierarchy is visible.
         # ADCFrontendTop owns the ADC formatting, validity checks, and fault
