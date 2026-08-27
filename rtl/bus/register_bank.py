@@ -118,10 +118,17 @@ class RegisterBank(Elaboratable):
         # They are expected to be mapped onto the software register map later.
         self.fast_kp = Signal(signed(18), reset=0)
         self.fast_ki = Signal(signed(18), reset=0)
-        self.fast_out_min = Signal(signed(16), reset=-32768)
-        self.fast_out_max = Signal(signed(16), reset=32767)
+        # RECOMMENDED FIX: tighten default fast output clamp from full scale (±32767 ≈ ±1V)
+        # to a conservative starting range (±3200 ≈ ±0.1V) to prevent surprise full-scale
+        # steps to downstream laser/piezo drivers until explicitly configured by operator.
+        self.fast_out_min = Signal(signed(16), reset=-3200)
+        self.fast_out_max = Signal(signed(16), reset=3200)
         self.fast_out_safe = Signal(signed(16), reset=0)
-        self.ramp_min = Signal(signed(16), reset=-32768)
+        # BLOCKER FIX: ramp_min defaults to full negative scale, causing unconfigured
+        # wide scans to slam the slow DAC to -1 V on first enable. Changed from -32768
+        # to -3200 (about -0.1 V) for a conservative safe default. Explicitly tighten
+        # or widen depending on actual actuator range when deploying.
+        self.ramp_min = Signal(signed(16), reset=-3200)
         self.ramp_max = Signal(signed(16), reset=32767)
         self.ramp_step = Signal(16, reset=32)
         self.ramp_tick_div = Signal(16, reset=32)

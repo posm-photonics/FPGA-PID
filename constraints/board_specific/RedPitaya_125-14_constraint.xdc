@@ -157,7 +157,13 @@ set_property DRIVE      8        [get_ports {exp_p_io[*]}]
 set_property DRIVE      8        [get_ports {exp_n_io[*]}]
 set_property PACKAGE_PIN G17 [get_ports {exp_p_io[0]}]
 set_property PACKAGE_PIN G18 [get_ports {exp_n_io[0]}]
+
+# External interlock input (exp_p_io[1]) has explicit pull-up to fail safe.
+# An interlock with floating input or missing pull-down reads as "no fault",
+# which is fail-permissive (wrong). Pull-up ensures disconnected/open-circuit
+# interlock falls to fault state, the safe direction.
 set_property PACKAGE_PIN H16 [get_ports {exp_p_io[1]}]
+set_property PULLUP      TRUE   [get_ports {exp_p_io[1]}]
 set_property PACKAGE_PIN H17 [get_ports {exp_n_io[1]}]
 set_property PACKAGE_PIN J18 [get_ports {exp_p_io[2]}]
 set_property PACKAGE_PIN H18 [get_ports {exp_n_io[2]}]

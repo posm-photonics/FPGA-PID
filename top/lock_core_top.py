@@ -213,11 +213,17 @@ class LockCoreTop(Elaboratable):
 
         # The output limiter clamps the actuator-facing signal before it reaches
         # the final safety gate.
+        # RECOMMENDED FIX: wire i_min/i_max to register values instead of hardcoded
+        # full scale, making this a real independent safety stage per its docstring
+        # ("hardware protection"). This clamp now reads from fast_out_min/fast_out_max
+        # which have been tightened to conservative defaults (±0.1V). Software can
+        # deliberately widen these for a specific actuator once deployment hardware
+        # is confirmed.
         m.d.comb += [
             output_limiter.i_u.eq(pi_ctrl.control_out),
             output_limiter.i_valid.eq(pi_ctrl.control_valid),
-            output_limiter.i_min.eq(-32768),
-            output_limiter.i_max.eq(32767),
+            output_limiter.i_min.eq(reg_bank.fast_out_min),
+            output_limiter.i_max.eq(reg_bank.fast_out_max),
         ]
 
         # FaultGate is the final safety stage and must override the fast command.
