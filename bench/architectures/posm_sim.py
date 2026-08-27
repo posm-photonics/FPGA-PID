@@ -31,6 +31,8 @@ class PosmSim(Architecture):
         config.settling_window = scenario.settling_window
 
         runner = ClosedLoopRunner(config)
+        for name, specification in scenario.faults.items():
+            runner.injector.enable_fault(name, **dict(specification))
         summary = runner.run()
         history = runner._history
         return Result(
@@ -44,7 +46,7 @@ class PosmSim(Architecture):
             traces={
                 "laser_detuning": [row["laser_detuning"] for row in history],
                 "fast_dac": [row["fast_dac"] for row in history],
-                "slow_dac": [row["slow_dac"] for row in history],
+                "slow_dac": [row["dut_slow_dac"] for row in history],
             },
             metadata={"summary": summary, "backend": "Amaranth"},
         )

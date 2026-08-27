@@ -45,6 +45,7 @@ from rtl.bus.register_defs import (
     ADDR_SLOW_CTRL_CONFIG,
     ADDR_SLOW_RECENTER_TARGET,
     ADDR_SLOW_RECENTER_GAIN,
+    ADDR_SLOW_SLEW_LIMIT,
     ADDR_SLOW_OUT_MIN,
     ADDR_SLOW_OUT_MAX,
     ADDR_SLOW_OUT_SAFE,
@@ -52,9 +53,8 @@ from rtl.bus.register_defs import (
     ADDR_FAULT_ENABLE,
     CTRL_GLOBAL_ENABLE,
     CTRL_LOCK_ENABLE_REQUEST,
-    CTRL_TRACE_CAPTURE_ENABLE,
-    CTRL_AUTOLOCK_ENABLE,
-    CTRL_SLOW_RECENTER_ENABLE,
+    SLOW_CFG_RECENTER_ENABLE,
+    SLOW_CFG_TICK_DIV_SHIFT,
 )
 from top.lock_core_top import LockCoreTop
 from sim.models.fake_laser_plant import FakeLaserPlant
@@ -97,8 +97,11 @@ class ClosedLoopRunner:
         # Seed the fast loop and autolock configuration that the FSM depends on.
         # Without these values, the PI gains remain zero and the autolock feature
         # thresholds stay at their default zero values, which stalls the lock FSM.
-        yield from self._write_reg(self.dut, ADDR_FAST_KP, -32768)
-        yield from self._write_reg(self.dut, ADDR_FAST_KI, -8192)
+        has_slow_drift = abs(self.config.laser.drift_rate) >= 0.01
+        fast_kp = -8192 if has_slow_drift else -32768
+        fast_ki = -1024 if has_slow_drift else -8192
+        yield from self._write_reg(self.dut, ADDR_FAST_KP, fast_kp)
+        yield from self._write_reg(self.dut, ADDR_FAST_KI, fast_ki)
         yield from self._write_reg(self.dut, ADDR_FAST_OUT_MIN, -4096)
         yield from self._write_reg(self.dut, ADDR_FAST_OUT_MAX, 4096)
         yield from self._write_reg(self.dut, ADDR_FAST_OUT_SAFE, 0)
@@ -120,15 +123,14 @@ class ClosedLoopRunner:
         yield from self._write_reg(self.dut, ADDR_AUTOLOCK_SLOPE_SIGN, 1)
         yield from self._write_reg(self.dut, ADDR_AUTOLOCK_RETRY_LIMIT, 3)
         yield from self._write_reg(self.dut, ADDR_ERROR_CONFIG, 0)
-        yield from self._write_reg(self.dut, ADDR_LOCK_ERROR_MAX,
-                       int(self.config.lock_threshold))
-
         yield from self._write_reg(self.dut, ADDR_SLOW_CTRL_CONFIG,
-                                   (1 << CTRL_TRACE_CAPTURE_ENABLE) | (1 << CTRL_AUTOLOCK_ENABLE)
-                                   | (1 << CTRL_SLOW_RECENTER_ENABLE))
+                                   (1 << SLOW_CFG_RECENTER_ENABLE)
+                                   | (4 << SLOW_CFG_TICK_DIV_SHIFT))
         yield from self._write_reg(self.dut, ADDR_SLOW_BIAS, 0)
         yield from self._write_reg(self.dut, ADDR_SLOW_RECENTER_TARGET, 0)
-        yield from self._write_reg(self.dut, ADDR_SLOW_RECENTER_GAIN, 64)
+        recenter_gain = -128 if has_slow_drift else 0
+        yield from self._write_reg(self.dut, ADDR_SLOW_RECENTER_GAIN, recenter_gain)
+        yield from self._write_reg(self.dut, ADDR_SLOW_SLEW_LIMIT, 256)
         yield from self._write_reg(self.dut, ADDR_SLOW_OUT_MIN, -4096)
         yield from self._write_reg(self.dut, ADDR_SLOW_OUT_MAX, 4096)
         yield from self._write_reg(self.dut, ADDR_SLOW_OUT_SAFE, 0)
@@ -157,13 +159,17 @@ class ClosedLoopRunner:
                 # range used by the fixed-point RTL. Keep the scale in one
                 # place so lock_error_max remains a meaningful code limit.
                 adc_code = int(round(adc_sample / self.config.adc_scale))
-                yield dut.i_adc_ch0.eq(adc_code)
-                yield dut.i_adc_ch1.eq(int(round(adc_code * 0.5)))
+                # ADCFormatter defaults to offset-binary input; encode the
+                # model's signed ADC codes before driving the DUT.
+                yield dut.i_adc_ch0.eq(adc_code + (1 << 15))
+                yield dut.i_adc_ch1.eq(int(round(adc_code * 0.5)) + (1 << 15))
                 yield dut.i_adc_valid.eq(1)
                 yield dut.i_adc_overrange_ch0.eq(0)
                 yield dut.i_adc_overrange_ch1.eq(0)
                 yield dut.i_external_interlock.eq(0)
-                yield dut.i_feature_selected.eq(step > 10)
+                # Let the configured trace capture complete before selecting a
+                # feature; selecting after ten samples aborts the wide scan.
+                yield dut.i_feature_selected.eq(step >= 256)
                 yield Tick()
                 yield Settle()
 
@@ -188,6 +194,7 @@ class ClosedLoopRunner:
                     "controller_output_after_limiting": fast_adj,
                     "integrator": 0.0,
                     "lock_state": int((yield dut.lock_state)),
+                    "dut_slow_dac": int((yield dut.o_dac_slow)),
                     "fault_flags": ",".join(self.injector.active_flags),
                     "thermal_drift": self.signal._drift,
                     "fast_saturation_flag": 1.0 if abs(fast_adj) >= 1000.0 else 0.0,
@@ -240,6 +247,7 @@ class ClosedLoopRunner:
                 "controller_output_after_limiting",
                 "integrator",
                 "lock_state",
+                "dut_slow_dac",
                 "fault_flags",
                 "thermal_drift",
                 "fast_saturation_flag",

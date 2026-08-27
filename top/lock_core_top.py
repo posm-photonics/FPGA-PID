@@ -245,7 +245,6 @@ class LockCoreTop(Elaboratable):
                 | (lock_fsm.state == LockState.TRACE_READY)
                 | (lock_fsm.state == LockState.ZOOM_SCAN)
                 | (lock_fsm.state == LockState.FEATURE_VERIFY)
-                | (lock_fsm.state == LockState.ARM_LOCK)
                 | (lock_fsm.state == LockState.RELOCK_SCAN)
             ),
             slow_dac_source.eq(Mux(scan_path_active, ramp_scan.ramp_out, slow_recenter.slow_out)),

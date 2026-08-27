@@ -8,7 +8,7 @@ from .scenario_base import Scenario
 BASE_SCENARIOS = (
     Scenario(
         name="clean_easy_lock",
-        duration_s=1.0,
+        duration_s=2.0,
         signal={"noise_std": 2.0, "drift_rate": 0.0},
         plant={"noise_std": 0.0, "initial_detuning": 0.4},
         expected_lock=True,
@@ -31,7 +31,7 @@ BASE_SCENARIOS = (
         name="signal_dropout_mid_lock",
         duration_s=2.0,
         signal={"noise_std": 3.0},
-        faults={"dropout": {"start_time": 1.0, "duration": 0.25}},
+        faults={"missing_adc_samples": {"start_time": 1.0, "duration": 0.25}},
         plant={"initial_detuning": 0.4},
         expected_lock=False,
     ),
