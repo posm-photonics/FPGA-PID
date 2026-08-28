@@ -129,10 +129,38 @@ class DemodLowpass(Elaboratable):
         x_ext = Signal(signed(self.acc_w))
         m.d.comb += x_ext.eq(self.sample_in << frac)
 
-        # Difference: x[n] - y[n-1] (in accumulator precision).
+        # TIMING FIX -- algebraic regrouping, exact, no change to the
+        # arithmetic result.
+        #
+        # The update was
+        #
+        #     diff   = x_ext - acc                 (acc_w+1 subtract)
+        #     update = (diff + round_add) >> alpha (acc_w+1 add, then
+        #                                           a 5-stage barrel
+        #                                           shifter)
+        #     acc   <= acc + update                (acc_w add)
+        #
+        # so the acc recurrence contained TWO carry-propagate adders, a
+        # subtract and a barrel shift: 28 logic levels, 8.68 ns of logic
+        # alone against an 8 ns budget, measured on the synth_xilinx
+        # netlist.
+        #
+        # round_add depends only on alpha_shift (a register field) and
+        # x_ext only on sample_in, so neither depends on acc. Since
+        #
+        #     (x - acc) + r  ==  (x + r) - acc
+        #
+        # the "+ round_add" adder can be moved OUT of the recurrence and
+        # merged with x_ext, one pipeline stage ahead of the loop. The
+        # recurrence then holds one subtract, the shifter and one add.
+        # Bit-for-bit identical output; costs one cycle of input latency,
+        # declared in docs/02_signal_chain.md.
+        x_plus_round = Signal(signed(self.acc_w + 1))
+
+        # Difference: (x[n] + round) - y[n-1], in accumulator precision.
         # One extra bit: x_ext and acc can sit at opposite extremes.
         diff = Signal(signed(self.acc_w + 1))
-        m.d.comb += diff.eq(x_ext - acc)
+        m.d.comb += diff.eq(x_plus_round - acc)
 
         # Clamp alpha_shift to a safe range
         alpha_clamped = Signal(5)
@@ -156,9 +184,27 @@ class DemodLowpass(Elaboratable):
             m.d.comb += round_add.eq(
                 Const(1, unsigned(self.acc_w)) << alpha_minus_1)
 
+        # Pipeline stage: the pre-add that used to live inside the
+        # recurrence. sample_valid is delayed with it so the update still
+        # consumes the sample the pre-add was computed from.
+        sample_valid_d = Signal()
+        with m.If(self.reset_filter):
+            # Reset stays immediate, exactly as before, and also flushes
+            # the new pipeline register so the first sample after a reset
+            # cannot be computed from a pre-reset input.
+            m.d.sync += [
+                x_plus_round.eq(0),
+                sample_valid_d.eq(0),
+            ]
+        with m.Else():
+            m.d.sync += [
+                x_plus_round.eq(x_ext + round_add),
+                sample_valid_d.eq(self.sample_valid),
+            ]
+
         # IIR update: acc += round(diff / 2^alpha)
         update = Signal(signed(self.acc_w + 1))
-        m.d.comb += update.eq((diff + round_add) >> alpha_clamped)
+        m.d.comb += update.eq(diff >> alpha_clamped)
 
         # Output: take the UPPER bits, with round-to-nearest.
         out_round = Signal(signed(self.acc_w + 1))
@@ -187,7 +233,7 @@ class DemodLowpass(Elaboratable):
                 self.sample_out.eq(0),
                 self.out_valid.eq(0),
             ]
-        with m.Elif(self.sample_valid):
+        with m.Elif(sample_valid_d):
             m.d.sync += [
                 acc.eq(acc + update),
                 self.sample_out.eq(out_clamped),

@@ -20,6 +20,10 @@ def test_demodulator():
         yield dut.adc_valid.eq(1)
         yield Tick()
         yield Tick()
+        # LATENCY UPDATE: Demodulator is 2 cycles now (products registered
+        # into the DSP48E1 MREG so the fast path meets 8 ns). One extra
+        # tick per observation; the values asserted are unchanged.
+        yield Tick()
         
         i_out = (yield dut.i_out)
         q_out = (yield dut.q_out)
@@ -34,6 +38,10 @@ def test_demodulator():
         yield dut.ref_cos.eq(0)
         yield dut.adc_valid.eq(1)
         yield Tick()
+        yield Tick()
+        # LATENCY UPDATE: Demodulator is 2 cycles now (products registered
+        # into the DSP48E1 MREG so the fast path meets 8 ns). One extra
+        # tick per observation; the values asserted are unchanged.
         yield Tick()
         
         i_out = (yield dut.i_out)

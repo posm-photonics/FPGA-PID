@@ -248,11 +248,46 @@ class SlowRecenter(Elaboratable):
 
         # ---------------- Eq. 25 update ----------------
         # error term: (u_fast[n] - u_fast_center)
+        #
+        # TIMING FIX: this used to be one combinational blob --
+        #
+        #     fast_err = dac_fast_in - target          (comb)
+        #     product  = fast_err * gain               (comb)
+        #     ... slew clamp ... accumulator += delta  (sync)
+        #
+        # which put a 17-bit subtract, a DSP48E1 multiply with neither
+        # MREG nor PREG, and a 40-bit clamp on one register-to-register
+        # path. Structural analysis of the synth_xilinx netlist measured
+        # 23 logic levels and 11.98 ns of LOGIC delay alone on it, before
+        # any routing -- the worst path in the whole design, against an
+        # 8 ns budget.
+        #
+        # It is also the cheapest one in the design to fix, because this
+        # block is Category B: the accumulator only moves on slow_tick,
+        # which defaults to one sample in 2**12 (~33 us at 125 MHz). Two
+        # cycles (16 ns) of pipeline latency here is 0.05 % of one tick
+        # period. slow_tick is delayed by the same two cycles so the
+        # update still consumes the product computed from the sample that
+        # armed it -- the arithmetic per tick is bit-for-bit unchanged.
         fast_err = Signal(signed(dac_w + 1))
-        m.d.comb += fast_err.eq(self.dac_fast_in - target)
+        m.d.sync += fast_err.eq(self.dac_fast_in - target)
+
+        # Registering both multiplier operands and the product lets the
+        # DSP48E1 absorb them as AREG/BREG and MREG/PREG, which takes the
+        # multiply off the fabric path entirely.
+        gain_r = Signal(signed(gain_w + 1))
+        m.d.sync += gain_r.eq(gain)
 
         product = Signal(signed(dac_w + gain_w + 2))
-        m.d.comb += product.eq(fast_err * gain)  # already in Q(GAIN_FRAC) since gain is Q(GAIN_FRAC)
+        m.d.sync += product.eq(fast_err * gain_r)  # Q(GAIN_FRAC), gain is Q(GAIN_FRAC)
+
+        # Match the datapath delay so the tick and the product line up.
+        slow_tick_d = Signal(3)
+        m.d.sync += [slow_tick_d[0].eq(slow_tick),
+                     slow_tick_d[1].eq(slow_tick_d[0]),
+                     slow_tick_d[2].eq(slow_tick_d[1])]
+        slow_tick_p = Signal()
+        m.d.comb += slow_tick_p.eq(slow_tick_d[2])
 
         # slew-limit the per-tick delta (same Q(GAIN_FRAC) domain as accumulator)
         # AUDIT FIX (S3-7, part 4): this used to be
@@ -271,16 +306,24 @@ class SlowRecenter(Elaboratable):
         slew_ext    = Signal(accum_w)
         m.d.comb += slew_ext.eq(slew_limit)          # zero-extend, stays >= 0
         m.d.comb += delta_limit.eq(slew_ext << GAIN_FRAC)
+        # TIMING FIX: the slew clamp was combinational, so the 40-bit
+        # compare against +/-delta_limit and the 40-bit accumulator add
+        # sat on one register-to-register path (24 levels, 8.48 ns of
+        # logic against an 8 ns budget, measured after the multiply was
+        # pipelined). Registering the clamp result costs one more cycle
+        # on a datapath whose tick period defaults to 2**12 samples
+        # (~33 us); slow_tick is delayed to match, so the arithmetic per
+        # tick is unchanged.
         with m.If(product > delta_limit):
-            m.d.comb += delta_final.eq(delta_limit)
+            m.d.sync += delta_final.eq(delta_limit)
         with m.Elif(product < -delta_limit):
-            m.d.comb += delta_final.eq(-delta_limit)
+            m.d.sync += delta_final.eq(-delta_limit)
         with m.Else():
-            m.d.comb += delta_final.eq(product)
+            m.d.sync += delta_final.eq(product)
 
         with m.If(accum_reset):
             m.d.sync += accumulator.eq(0)
-        with m.Elif(slow_tick & recenter_enable & ~hold
+        with m.Elif(slow_tick_p & recenter_enable & ~hold
                     & ~accum_load & ~self.fault_force):
             m.d.sync += accumulator.eq(accumulator + delta_final)
         # accum_load is handled entirely by the SLOW_OUT_CURRENT write

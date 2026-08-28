@@ -178,6 +178,11 @@ def test_tc02_i_only():
         ctx.set(dut.error_valid, 1)
         await ctx.tick()
         ctx.set(dut.error_valid, 0)
+        # LATENCY UPDATE: PICore is now 2 cycles (multiply registered
+        # into the DSP48E1 MREG/PREG so the fast path meets 8 ns).
+        # One extra tick per observation; the arithmetic asserted
+        # below is unchanged.
+        await ctx.tick()
  
         # Output = Kp*e + I[3] = 0 + 3*Ki*e (integrator from the 3 prior pulses)
         expected_int = int(3 * ki_real * error_val)
@@ -216,6 +221,11 @@ def test_tc03_pi_combined():
         # Integrator update (Ki*e) is registered, so I[1] is set AFTER this cycle.
         ctx.set(dut.error_in, error_val)
         ctx.set(dut.error_valid, 1)
+        await ctx.tick()
+        # LATENCY UPDATE: PICore is now 2 cycles (multiply registered
+        # into the DSP48E1 MREG/PREG so the fast path meets 8 ns).
+        # One extra tick per observation; the arithmetic asserted
+        # below is unchanged.
         await ctx.tick()
         out1 = signed16(ctx.get(dut.control_out))
         expected1 = int(0.5 * error_val)   # Kp*e + I[0]=0
@@ -454,6 +464,10 @@ def test_tc08_integrator_reset():
         ctx.set(dut.error_in, 1000)
         ctx.set(dut.error_valid, 1)
         await ctx.tick()
+        await ctx.tick()
+        # LATENCY UPDATE: PICore is now 2 cycles (multiply registered into
+        # the DSP48E1 MREG/PREG so the fast path meets 8 ns). One extra
+        # tick before the observation; the value asserted is unchanged.
         await ctx.tick()
         ctx.set(dut.error_valid, 0)
         out_after = signed16(ctx.get(dut.control_out))

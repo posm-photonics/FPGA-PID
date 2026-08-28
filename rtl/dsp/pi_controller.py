@@ -28,16 +28,23 @@
 #
 # N.B: Q3.14 is a fixed-point number format used to represent floating points.
 #
-# PICore latency: 1 clock cycle, error_valid -> control_valid.
-#   (The previous header claimed 2. There is one registered stage; the
-#   multiply, the >>gain_frac scaling, the accumulator add and the
-#   limit comparison are all combinational ahead of it. Packet 7.3
-#   requires every fast-path module to declare its real valid-in ->
-#   valid-out latency, so this is now the measured number. That single
-#   combinational path is also the timing risk called out as S3-2: if
-#   synthesis cannot close 20x18 multiply + 40-bit add + 40-bit compare
-#   in 8 ns on the -1 part, add a DSP48 MREG here and re-declare the
-#   latency as 2.)
+# PICore latency: 2 clock cycles, error_valid -> control_valid.
+#   Stage 1 is the multiply (Kp*e and Ki*e), registered so the DSP48E1
+#   absorbs it as MREG/PREG. Stage 2 is the >>gain_frac scaling, the
+#   accumulator add, the limit comparison and the output capture.
+#
+#   This was 1 cycle and one enormous combinational path. S3-2 predicted
+#   the consequence and said "if synthesis cannot close 20x18 multiply +
+#   40-bit add + 40-bit compare in 8 ns on the -1 part, add a DSP48 MREG
+#   here and re-declare the latency as 2." Synthesis was finally run:
+#   structural analysis of the synth_xilinx netlist measured 20 logic
+#   levels and 10.02 ns of logic delay on that path, before any routing,
+#   against an 8 ns budget. So the MREG was added and the latency is
+#   re-declared as 2, exactly as S3-2 instructed.
+#
+#   The integrator recurrence is deliberately NOT pipelined. It is a
+#   single-cycle feedback loop and splitting it would halve the
+#   effective integral rate.
 #
 # WARNING -- RelayTuner / PIWithAutoTune are NOT part of the shipped
 # design. top/lock_core_top.py instantiates PICore directly. Nothing in
@@ -216,6 +223,52 @@ class PICore(Elaboratable):
 
         p_term    = Signal(signed(mul_w))
         i_term    = Signal(signed(mul_w))
+
+        # ===================================================================
+        # TIMING FIX -- multiplier pipeline stage.
+        # ===================================================================
+        # p_term and i_term used to be combinational:
+        #
+        #     m.d.comb += p_term.eq(self.error_in * self.kp)
+        #     m.d.comb += i_term.eq(self.error_in * self.ki)
+        #
+        # Both map to a DSP48E1. With the product combinational the
+        # synthesiser sets MREG=0 and PREG=0, so the whole 20x18 multiply
+        # and 48-bit post-adder sit on the same register-to-register path
+        # as the 40-bit accumulator arithmetic that follows. Structural
+        # analysis of the synth_xilinx netlist measured 20 logic levels
+        # and 10.02 ns of logic delay, before routing, against 8 ns.
+        #
+        # Registering the product lets the DSP absorb it as MREG/PREG.
+        # The multiply then becomes a self-contained register-to-register
+        # hop inside the DSP tile and leaves the fabric path entirely.
+        #
+        # Cost: exactly one cycle of latency, declared in
+        # docs/02_signal_chain.md (pi_core 1 -> 2 cycles, fast path
+        # 7 -> 8 cycles = 64 ns at 125 MHz). Packet 7.3 rates 50 ns
+        # "excellent" and 100 ns "still reasonable", so 64 ns stays
+        # inside the band. At the loop bandwidths this servo targets
+        # (tens to hundreds of kHz) 8 ns of extra delay is under a
+        # thousandth of a degree of phase; the pole it adds is at
+        # 20 MHz.
+        #
+        # What is NOT pipelined, deliberately: the integrator recurrence
+        # integrator -> int_sum -> int_next -> integrator. That is a
+        # single-cycle feedback loop, and splitting it would halve the
+        # effective integral rate and change the tuning. It stays as one
+        # cycle. i_term entering the loop is now a register output, which
+        # shortens the loop path without touching its structure.
+        # ===================================================================
+        m.d.sync += [
+            p_term.eq(self.error_in * self.kp),
+            i_term.eq(self.error_in * self.ki),
+        ]
+
+        # error_valid has to be delayed by the same cycle so that the
+        # integrator update and control_out capture still line up with
+        # the sample the products were computed from.
+        error_valid_d = Signal()
+        m.d.sync += error_valid_d.eq(self.error_valid)
         p_scaled  = Signal(signed(self.acc_w))
         int_out   = Signal(signed(self.acc_w))
         candidate = Signal(signed(self.acc_w))
@@ -251,13 +304,6 @@ class PICore(Elaboratable):
             int_max.eq(self.out_max << self.gain_frac),
             int_min.eq(self.out_min << self.gain_frac),
 
-            # ( Kp * e[n] )
-            p_term.eq(self.error_in * self.kp),
-
-            # ( Ki * e[n] ) -- NOT shifted here. This is the value that
-            # gets accumulated, at full precision.
-            i_term.eq(self.error_in * self.ki),
-
             # Proportional term, scaled back to output units with
             # round-to-nearest.
             p_scaled.eq((p_term + round_half) >> self.gain_frac),
@@ -289,9 +335,34 @@ class PICore(Elaboratable):
             # rather than the truncated i_scaled, which used to read as
             # zero inside the dead zone and released anti-windup when it
             # should not have.
+            # TIMING FIX: this used to read sat_hi_comb / sat_lo_comb,
+            # the COMBINATIONAL saturation flags. That closed a feedback
+            # loop
+            #
+            #   integrator -> int_out -> candidate -> sat_*_comb
+            #              -> windup_suppress -> integrator
+            #
+            # which put a 40-bit add AND a 40-bit compare inside the
+            # single-cycle integrator recurrence, on top of the 40-bit
+            # accumulate the recurrence already needs. Measured at 19
+            # logic levels.
+            #
+            # self.sat_hi / self.sat_lo are the same flags one cycle
+            # later, already registered as module outputs. Using them
+            # takes the whole candidate-and-compare chain out of the
+            # recurrence and leaves only the accumulate.
+            #
+            # Behavioural effect: anti-windup engages one sample (8 ns)
+            # after the output reaches a limit instead of in the same
+            # sample. Saturation events last for thousands of samples --
+            # that is the point of anti-windup -- so one sample of extra
+            # integration at the moment of entry is far below the
+            # accumulator's LSB in any real event. Gating integration on
+            # the registered saturation flag is the standard structure;
+            # TC06 covers it.
             windup_suppress.eq(
-                (sat_hi_comb & (i_term > 0)) |
-                (sat_lo_comb & (i_term < 0))
+                (self.sat_hi & (i_term > 0)) |
+                (self.sat_lo & (i_term < 0))
             ),
         ]
 
@@ -322,14 +393,14 @@ class PICore(Elaboratable):
         with m.Elif(self.integrator_load):
             m.d.sync += integrator.eq(load_scaled)
 
-        with m.Elif(self.error_valid & self.lock_enable
+        with m.Elif(error_valid_d & self.lock_enable
                     & ~self.hold_enable & ~self.integrator_hold):
             with m.If(~windup_suppress): # Only integrate if windup_suppress = 0
                 m.d.sync += integrator.eq(int_next)
 
         m.d.sync += self.control_valid.eq(0)
  
-        with m.If(self.error_valid & self.lock_enable):
+        with m.If(error_valid_d & self.lock_enable):
  
             with m.If(self.hold_enable):
                 # The previous output remains stored.
@@ -369,7 +440,7 @@ class PICore(Elaboratable):
                 self.control_out.eq(self.out_safe),
                 self.sat_hi.eq(0),
                 self.sat_lo.eq(0),
-                self.control_valid.eq(self.error_valid),
+                self.control_valid.eq(error_valid_d),
             ]
  
         return m

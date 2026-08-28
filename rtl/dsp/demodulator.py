@@ -84,7 +84,20 @@ class Demodulator(Elaboratable):
         i_product = Signal(signed(self.mul_w))
         q_product = Signal(signed(self.mul_w))
 
-        m.d.comb += [
+        # TIMING FIX: these were combinational, so both DSP48E1s came out
+        # with MREG=0 and PREG=0 and the 25x18 multiply plus the 48-bit
+        # post-adder sat on the same register-to-register path as the
+        # shift and the SatMath clamp behind them -- 5.06 ns of logic
+        # alone against an 8 ns budget, the worst path left in the design
+        # after the other three multipliers were pipelined.
+        #
+        # Registering the products lets the DSP absorb them as MREG, so
+        # the multiply becomes a self-contained hop inside the DSP tile.
+        #
+        # Cost: one cycle. pdh_frontend already declares 2 cycles in
+        # docs/02_signal_chain.md and it is now 4 (one here, one in the
+        # low-pass pre-add). Both are declared there.
+        m.d.sync += [
             i_product.eq(self.adc_in * self.ref_sin),
             q_product.eq(self.adc_in * self.ref_cos),
         ]
@@ -111,8 +124,14 @@ class Demodulator(Elaboratable):
             sat_q.value_in.eq(q_shifted),
         ]
 
-        # Registered output (1-cycle latency)
-        with m.If(self.adc_valid):
+        # Registered output. Now 2 cycles: stage 1 is the multiply
+        # (absorbed as DSP48E1 MREG), stage 2 is the shift, the SatMath
+        # clamp and this capture. adc_valid is delayed to match so the
+        # capture still lines up with the sample the products came from.
+        adc_valid_d = Signal()
+        m.d.sync += adc_valid_d.eq(self.adc_valid)
+
+        with m.If(adc_valid_d):
             m.d.sync += [
                 self.i_out.eq(sat_i.value_out),
                 self.q_out.eq(sat_q.value_out),

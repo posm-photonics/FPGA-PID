@@ -44,8 +44,30 @@ class LockCoreTop(Elaboratable):
 
     def __init__(self):
         # External clock and reset for the single synchronous clock domain.
-        self.clk = Signal()
-        self.rst = Signal()
+        #
+        # AUDIT FIX (S3-10, second attempt): self.clk and self.rst ARE the
+        # sync domain's own clk/rst signals, not separate signals that get
+        # comb-driven onto them in elaborate(). The distinction matters:
+        #
+        #   * comb-driving ClockSignal("sync") makes the domain's clock a
+        #     combinationally driven net, so Simulator.add_clock() raises
+        #     DriverConflict and no testbench can attach a clock to this
+        #     module. sim/tb_lock_core_top.py had to bit-bang dut.clk to
+        #     work around it, and sim/tb_dsp/tb_pdh_closed_loop.py, which
+        #     uses add_clock() like a normal Amaranth testbench, simply
+        #     failed.
+        #   * aliasing the domain's signals costs nothing, keeps clk/rst
+        #     as ports of the generated module (ClockDomain names them
+        #     exactly "clk" and "rst", so red_pitaya_top.sv's 20-port
+        #     instantiation is unchanged), and leaves the net undriven
+        #     inside the design so a parent or a testbench can drive it.
+        #
+        # The emitted Verilog is unchanged by this: the board wrapper in
+        # top/RedPitaya_Lock_Core.py still connects .clk(clk) to this
+        # module's clk port.
+        self._cd_sync = ClockDomain("sync")
+        self.clk = self._cd_sync.clk
+        self.rst = self._cd_sync.rst
 
         # Physical ADC interface exposed directly to the board wrapper.
         self.i_adc_ch0 = Signal(16)
@@ -119,12 +141,14 @@ class LockCoreTop(Elaboratable):
         # or the testbench to drive, which is the normal Amaranth
         # arrangement. self.clk stays in the port list so the generated
         # Verilog keeps the same interface for red_pitaya_top.v.
+        #
+        # The comment above described the right fix; the code below it
+        # still did the wrong thing. self.clk / self.rst are now the
+        # domain's own signals (see __init__), so all this has to do is
+        # register the domain. Nothing drives clk or rst from inside the
+        # design any more.
         # ------------------------------------------------------------------
-        m.domains.sync = ClockDomain()
-        m.d.comb += [
-             ClockSignal("sync").eq(self.clk),
-             ResetSignal("sync").eq(self.rst),
-         ]
+        m.domains += self._cd_sync
 
         heartbeat_ctr = Signal(24)
         m.d.sync += heartbeat_ctr.eq(heartbeat_ctr + 1)
