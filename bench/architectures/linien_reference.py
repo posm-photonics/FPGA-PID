@@ -1,4 +1,30 @@
-"""Approximate, simulation-only model of a Linien-style PID loop."""
+"""Approximate, simulation-only model of a Linien-style PID loop.
+
+WARNING -- READ BEFORE QUOTING ANY RESULT FROM THIS FILE
+========================================================
+This is an IDEALISED FLOATING-POINT model. It is not Linien, it is not
+Linien's gateware, and it is not even fixed point: the integrator is a
+Python float updated as `integral += error * timestep`.
+
+That matters more than it sounds. The class of defect that was actually
+breaking the POSM design was fixed-point truncation:
+
+  * the PI integrator shifted Ki*e down BEFORE accumulating, giving a
+    dead zone for small errors and a monotonic drift to a rail on a
+    zero-mean error, and
+  * the demodulation low-pass did the same thing and settled up to
+    2^alpha - 1 counts short of its input.
+
+A float model has none of that behaviour by construction, so comparing
+POSM against this reference can never surface that class of bug. It
+scores loop shaping and scenario handling only.
+
+Do not describe output from this harness as parity with Linien. For a
+real comparison either read Linien's gateware directly
+(linien/gateware/logic/pid.py) or drive real hardware through
+LinienHardware, which needs an injected client that does not currently
+exist.
+"""
 
 from __future__ import annotations
 

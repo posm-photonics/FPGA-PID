@@ -65,7 +65,15 @@ from .register_defs import (
     ADDR_ERROR_CONFIG, ADDR_LOCK_ERROR_MAX, ERROR_CFG_INVERT,
     ADDR_PDH_CONTROL, ADDR_PDH_MOD_FREQ, ADDR_PDH_MOD_AMP,
     ADDR_PDH_DEMOD_PHASE, ADDR_PDH_LPF_ALPHA,
-    PDH_CTRL_ENABLE
+    PDH_CTRL_ENABLE,
+    ADDR_ERROR_SETPOINT, ADDR_ERROR_OFFSET,
+    ADDR_ADC_CONFIG, ADDR_ADC_GUARD_COUNT, ADC_CFG_FORMAT_MODE,
+    ADC_CFG_FAULT_ENABLE,
+    ADDR_FAST_INT_LEAK,
+    ADDR_LOCK_CHECK_DELAY, ADDR_LOCK_MAX_ERROR, ADDR_LOCK_MAX_SAT_COUNT,
+    ADDR_LOCK_ADC_TIMEOUT, ADDR_LOCK_ERROR_TIMEOUT, ADDR_LOCK_JUMP_LIMIT,
+    ADDR_LOCK_JUMP_WINDOW, ADDR_LOCK_STATE_TIMEOUT, ADDR_LOCK_RELOCK_LIMIT,
+    ADDR_DAC_CONFIG, DAC_CFG_FAST_OFFSET_BIN, DAC_CFG_SLOW_OFFSET_BIN,
 )
 
 VERSION_ID = 0x0003_0000  # major=3 (matches "Version 3 Draft"), minor=0
@@ -116,43 +124,94 @@ class RegisterBank(Elaboratable):
         # These are intentionally minimal wiring points so the top-level wrapper
         # can use register-bank signals without introducing a larger redesign.
         # They are expected to be mapped onto the software register map later.
-        self.fast_kp = Signal(signed(18), reset=0)
-        self.fast_ki = Signal(signed(18), reset=0)
-        # RECOMMENDED FIX: tighten default fast output clamp from full scale (±32767 ≈ ±1V)
-        # to a conservative starting range (±3200 ≈ ±0.1V) to prevent surprise full-scale
-        # steps to downstream laser/piezo drivers until explicitly configured by operator.
-        self.fast_out_min = Signal(signed(16), reset=-3200)
-        self.fast_out_max = Signal(signed(16), reset=3200)
-        self.fast_out_safe = Signal(signed(16), reset=0)
-        # BLOCKER FIX: ramp_min defaults to full negative scale, causing unconfigured
-        # wide scans to slam the slow DAC to -1 V on first enable. Changed from -32768
-        # to -3200 (about -0.1 V) for a conservative safe default. Explicitly tighten
-        # or widen depending on actual actuator range when deploying.
-        self.ramp_min = Signal(signed(16), reset=-3200)
-        self.ramp_max = Signal(signed(16), reset=32767)
-        self.ramp_step = Signal(16, reset=32)
-        self.ramp_tick_div = Signal(16, reset=32)
-        self.ramp_center = Signal(signed(16), reset=0)
-        self.ramp_width = Signal(16, reset=1024)
-        self.autolock_window_min = Signal(16, reset=0)
-        self.autolock_window_max = Signal(16, reset=65535)
-        self.autolock_expected_min_x = Signal(16, reset=0)
-        self.autolock_expected_max_x = Signal(16, reset=0)
-        self.autolock_lock_x = Signal(16, reset=0)
-        self.autolock_amp_min = Signal(signed(24), reset=0)
-        self.autolock_width_min = Signal(16, reset=0)
-        self.autolock_width_max = Signal(16, reset=65535)
-        self.autolock_slope_sign = Signal(reset=0)
-        self.autolock_retry_limit = Signal(8, reset=3)
-        self.error_invert = Signal(reset=0)
-        self.lock_error_max = Signal(24, reset=25)
+        # NOTE: `reset=` is deprecated in Amaranth 0.5 and REMOVED in 0.6.
+        # All of these now use `init=` so the repo survives the next
+        # Amaranth release (see docs/Requirements.txt).
+        self.fast_kp = Signal(signed(18), init=0)
+        self.fast_ki = Signal(signed(18), init=0)
+        # Conservative default fast output clamp: +/-3200 (about +/-0.1 V)
+        # rather than full scale, so an unconfigured system cannot make a
+        # full-scale step into a laser or piezo driver.
+        self.fast_out_min = Signal(signed(16), init=-3200)
+        self.fast_out_max = Signal(signed(16), init=3200)
+        self.fast_out_safe = Signal(signed(16), init=0)
+        # Leaky integrator (packet 11.4 FAST_INT_LEAK). 0 = no leak.
+        self.fast_int_leak = Signal(5, init=0)
+
+        # AUDIT FIX: the conservative scan default was applied to
+        # ramp_min only. ramp_max was left at full positive scale
+        # (+32767, about +1 V), so the "safe default" was asymmetric and
+        # an unconfigured wide scan still slammed the slow DAC to +1 V on
+        # the first enable -- exactly the failure the ramp_min change was
+        # written to prevent. Symmetric now.
+        self.ramp_min = Signal(signed(16), init=-3200)
+        self.ramp_max = Signal(signed(16), init=3200)
+        self.ramp_step = Signal(16, init=32)
+        self.ramp_tick_div = Signal(16, init=32)
+        self.ramp_center = Signal(signed(16), init=0)
+        self.ramp_width = Signal(16, init=1024)
+
+        # AUDIT FIX (S2-8): the autolock scan-position fields are SIGNED.
+        # They are compared against ramp_scan.ramp_out, which is
+        # signed(16); as unsigned they broke for every negative scan
+        # position, and the default ramp_min is negative.
+        self.autolock_window_min = Signal(signed(16), init=-32768)
+        self.autolock_window_max = Signal(signed(16), init=32767)
+        self.autolock_expected_min_x = Signal(signed(16), init=0)
+        self.autolock_expected_max_x = Signal(signed(16), init=0)
+        self.autolock_lock_x = Signal(signed(16), init=0)
+        self.autolock_amp_min = Signal(signed(24), init=0)
+        self.autolock_width_min = Signal(16, init=0)
+        self.autolock_width_max = Signal(16, init=65535)
+        self.autolock_slope_sign = Signal(init=0)
+        self.autolock_retry_limit = Signal(8, init=3)
+
+        # --- Error calculation (packet 11.3) ---
+        self.error_invert = Signal(init=0)
+        self.error_setpoint = Signal(signed(20), init=0)
+        self.error_offset = Signal(signed(20), init=0)
+
+        # --- ADC configuration ---
+        # Format mode defaults to 1 (two's-complement passthrough), which
+        # is what the Red Pitaya board wrapper needs after its own
+        # sign/invert conversion.
+        self.adc_format_mode = Signal(init=1)
+        # Gates the ADC guard flags into fault_source (S3-5).
+        self.adc_fault_enable = Signal(init=1)
+        # Stuck-sample threshold. At 125 MSPS a quiet input holding one
+        # code for a few hundred samples is normal, so the old effective
+        # threshold of 16 produced routine false positives.
+        self.adc_guard_count = Signal(16, init=4096)
+
+        # --- Lock check / lock watch (packet 11.9) ---
+        # AUDIT FIX (S2-5): these were hardcoded constants in
+        # lock_core_top. Defaults chosen to be permissive enough that a
+        # normal lock acquisition does not trip them:
+        #   * lock_error_max was 25 counts against a 20-bit signed error
+        #     path (0.005% of range) and could never be satisfied.
+        #   * saturation timeout was 100 cycles = 800 ns, far shorter
+        #     than a real acquisition transient, and it escalated
+        #     straight to an unrecoverable fault.
+        self.lock_error_max = Signal(24, init=4096)
+        self.lock_check_delay = Signal(32, init=12500)      # 100 us at 125 MHz
+        self.lock_max_sat_count = Signal(32, init=1250000)  # 10 ms
+        self.lock_adc_timeout = Signal(32, init=1250)       # 10 us
+        self.lock_error_timeout = Signal(32, init=125000)   # 1 ms
+        self.lock_jump_limit = Signal(16, init=4096)
+        self.lock_jump_window = Signal(5, init=8)           # 256 samples
+        self.lock_state_timeout = Signal(32, init=1 << 28)  # ~2.1 s
+        self.lock_relock_limit = Signal(8, init=8)
+
+        # --- DAC configuration (packet 11.10) ---
+        self.dac_fast_offset_bin = Signal(init=0)
+        self.dac_slow_offset_bin = Signal(init=0)
 
         # --- PDH configuration hooks ---
         self.pdh_enable = Signal()
-        self.pdh_mod_freq = Signal(32, reset=0)
-        self.pdh_mod_amp = Signal(16, reset=0)
-        self.pdh_demod_phase = Signal(32, reset=0)
-        self.pdh_lpf_alpha = Signal(5, reset=8)
+        self.pdh_mod_freq = Signal(32, init=0)
+        self.pdh_mod_amp = Signal(16, init=0)
+        self.pdh_demod_phase = Signal(32, init=0)
+        self.pdh_lpf_alpha = Signal(5, init=8)
 
         # --- STATUS: inputs from the rest of the design (comb in) ---
         self.state          = Signal(4)   # from lock_fsm
@@ -226,11 +285,6 @@ class RegisterBank(Elaboratable):
                                        self.dat_w[:self.num_faults],
                                        0))
 
-        m.d.sync += fault_sticky.eq(
-            (fault_sticky & ~(clear_mask & fault_enable))
-            | (self.fault_in & fault_enable)
-        )
-
         # fault_clear_request in CONTROL is a self-clearing pulse bit,
         # exposed for modules that want a "clear everything" trigger
         # distinct from the masked FAULT_CLEAR write above.
@@ -239,15 +293,66 @@ class RegisterBank(Elaboratable):
         m.d.comb += self.fault_clear_pulse.eq(
             control[CTRL_FAULT_CLEAR_REQUEST] & ~fault_clear_req_r
         )
+
+        # AUDIT FIX (S3-3, part 1): fault_sticky had TWO sync drivers --
+        # the masked update, and an unconditional `fault_sticky.eq(0)`
+        # inside `with m.If(self.fault_clear_pulse)`. The later statement
+        # won, so a CONTROL fault-clear pulse wiped every sticky bit
+        # regardless of FAULT_ENABLE, contradicting both this module's
+        # docstring and packet 10.2 ("do not silently auto-recover").
+        # It also cleared a fault that was still asserting on that very
+        # cycle, which then re-latched immediately: a glitch that could
+        # momentarily drop the fault indication.
+        #
+        # Single driver now. A global clear wipes the latched history but
+        # immediately re-latches anything still actively asserting, so a
+        # live fault cannot be cleared away.
         with m.If(self.fault_clear_pulse):
-            m.d.sync += control.eq(control & ~(1 << CTRL_FAULT_CLEAR_REQUEST))
-            m.d.sync += fault_sticky.eq(0)
+            m.d.sync += fault_sticky.eq(self.fault_in & fault_enable)
+        with m.Else():
+            m.d.sync += fault_sticky.eq(
+                (fault_sticky & ~(clear_mask & fault_enable))
+                | (self.fault_in & fault_enable)
+            )
+
+        # ---------------- CONTROL: single driver ----------------
+        #
+        # AUDIT FIX (S3-3, part 2): `control` had THREE sync drivers --
+        # the bus write, the fault-clear-bit self-clear, and the
+        # soft-reset self-clear. Source order gave the soft-reset clear
+        # highest priority, so a software write to CONTROL that landed on
+        # the same cycle as a pending self-clear was SILENTLY DISCARDED
+        # and replaced by `control & ~SOFT_RESET`. A lost control write is
+        # exactly the kind of intermittent behaviour that is impossible
+        # to reproduce from a bench.
+        #
+        # Restructured into one driver: take the written value if a write
+        # is happening, otherwise hold, then mask off any self-clearing
+        # bits that are due. The write is never lost.
+        soft_reset_r = Signal()
+        m.d.sync += soft_reset_r.eq(control[CTRL_SOFT_RESET])
+        soft_reset_done = Signal()
+        m.d.comb += soft_reset_done.eq(control[CTRL_SOFT_RESET] & soft_reset_r)
+
+        ctrl_write = Signal()
+        m.d.comb += ctrl_write.eq(
+            self.stb & self.we & (word_adr == (ADDR_CONTROL >> 2)))
+
+        control_base = Signal(32)
+        m.d.comb += control_base.eq(Mux(ctrl_write, self.dat_w, control))
+
+        control_clear = Signal(32)
+        m.d.comb += control_clear.eq(
+            Mux(self.fault_clear_pulse, 1 << CTRL_FAULT_CLEAR_REQUEST, 0)
+            | Mux(soft_reset_done, 1 << CTRL_SOFT_RESET, 0)
+        )
+
+        m.d.sync += control.eq(control_base & ~control_clear)
 
         # ---------------- write decode ----------------
         with m.If(self.stb & self.we):
             with m.Switch(word_adr):
-                with m.Case(ADDR_CONTROL >> 2):
-                    m.d.sync += control.eq(self.dat_w)
+                # ADDR_CONTROL is handled by the single driver above.
                 with m.Case(ADDR_MODE >> 2):
                     m.d.sync += self.mode.eq(self.dat_w[:8])
                 with m.Case(ADDR_FAULT_ENABLE >> 2):
@@ -310,15 +415,59 @@ class RegisterBank(Elaboratable):
                     m.d.sync += self.pdh_demod_phase.eq(self.dat_w)
                 with m.Case(ADDR_PDH_LPF_ALPHA >> 2):
                     m.d.sync += self.pdh_lpf_alpha.eq(self.dat_w[:5])
-                # FAULT_CLEAR (write-only) handled combinationally above;
-                # VERSION / STATUS / FAULT_STATUS ignore writes.
 
-        # soft_reset self-clears one cycle after being set, so
-        # software doesn't have to write it back to zero.
-        soft_reset_r = Signal()
-        m.d.sync += soft_reset_r.eq(control[CTRL_SOFT_RESET])
-        with m.If(control[CTRL_SOFT_RESET] & soft_reset_r):
-            m.d.sync += control.eq(control & ~(1 << CTRL_SOFT_RESET))
+                # --- Error calculation (packet 11.3) ---
+                with m.Case(ADDR_ERROR_SETPOINT >> 2):
+                    m.d.sync += self.error_setpoint.eq(self.dat_w[:20].as_signed())
+                with m.Case(ADDR_ERROR_OFFSET >> 2):
+                    m.d.sync += self.error_offset.eq(self.dat_w[:20].as_signed())
+
+                # --- ADC configuration ---
+                with m.Case(ADDR_ADC_CONFIG >> 2):
+                    m.d.sync += [
+                        self.adc_format_mode.eq(
+                            self.dat_w[ADC_CFG_FORMAT_MODE]),
+                        self.adc_fault_enable.eq(
+                            self.dat_w[ADC_CFG_FAULT_ENABLE]),
+                    ]
+                with m.Case(ADDR_ADC_GUARD_COUNT >> 2):
+                    m.d.sync += self.adc_guard_count.eq(self.dat_w[:16])
+
+                # --- Fast controller extras (packet 11.4) ---
+                with m.Case(ADDR_FAST_INT_LEAK >> 2):
+                    m.d.sync += self.fast_int_leak.eq(self.dat_w[:5])
+
+                # --- Lock check / lock watch (packet 11.9) ---
+                with m.Case(ADDR_LOCK_CHECK_DELAY >> 2):
+                    m.d.sync += self.lock_check_delay.eq(self.dat_w)
+                with m.Case(ADDR_LOCK_MAX_ERROR >> 2):
+                    m.d.sync += self.lock_error_max.eq(self.dat_w[:24])
+                with m.Case(ADDR_LOCK_MAX_SAT_COUNT >> 2):
+                    m.d.sync += self.lock_max_sat_count.eq(self.dat_w)
+                with m.Case(ADDR_LOCK_ADC_TIMEOUT >> 2):
+                    m.d.sync += self.lock_adc_timeout.eq(self.dat_w)
+                with m.Case(ADDR_LOCK_ERROR_TIMEOUT >> 2):
+                    m.d.sync += self.lock_error_timeout.eq(self.dat_w)
+                with m.Case(ADDR_LOCK_JUMP_LIMIT >> 2):
+                    m.d.sync += self.lock_jump_limit.eq(self.dat_w[:16])
+                with m.Case(ADDR_LOCK_JUMP_WINDOW >> 2):
+                    m.d.sync += self.lock_jump_window.eq(self.dat_w[:5])
+                with m.Case(ADDR_LOCK_STATE_TIMEOUT >> 2):
+                    m.d.sync += self.lock_state_timeout.eq(self.dat_w)
+                with m.Case(ADDR_LOCK_RELOCK_LIMIT >> 2):
+                    m.d.sync += self.lock_relock_limit.eq(self.dat_w[:8])
+
+                # --- DAC configuration (packet 11.10) ---
+                with m.Case(ADDR_DAC_CONFIG >> 2):
+                    m.d.sync += [
+                        self.dac_fast_offset_bin.eq(
+                            self.dat_w[DAC_CFG_FAST_OFFSET_BIN]),
+                        self.dac_slow_offset_bin.eq(
+                            self.dat_w[DAC_CFG_SLOW_OFFSET_BIN]),
+                    ]
+                # FAULT_CLEAR (write-only) handled combinationally above;
+                # CONTROL has its own single driver above;
+                # VERSION / STATUS / FAULT_STATUS ignore writes.
 
         # ---------------- read mux ----------------
         with m.Switch(word_adr):
@@ -350,6 +499,104 @@ class RegisterBank(Elaboratable):
                 m.d.comb += self.dat_r.eq(self.pdh_demod_phase)
             with m.Case(ADDR_PDH_LPF_ALPHA >> 2):
                 m.d.comb += self.dat_r.eq(self.pdh_lpf_alpha)
+
+            # ===========================================================
+            # AUDIT FIX (S2-1): 21 R/W registers had a WRITE decode and
+            # no READ decode, so every one of them read back as 0.
+            # Confirmed in simulation: FAST_KP written 8192 read back 0,
+            # FAST_OUT_MAX written 5000 read back 0, RAMP_STEP written 64
+            # read back 0, AUTOLOCK_LOCK_X written 1234 read back 0.
+            #
+            # register_defs.py marks all of them R/W and packet section 11
+            # states plainly: "Every writable configuration value should
+            # be readable." The GUI declares all of them writable and
+            # would have shown 0 for each after any refresh.
+            # ===========================================================
+            with m.Case(ADDR_FAST_KP >> 2):
+                m.d.comb += self.dat_r.eq(self.fast_kp)
+            with m.Case(ADDR_FAST_KI >> 2):
+                m.d.comb += self.dat_r.eq(self.fast_ki)
+            with m.Case(ADDR_FAST_OUT_MIN >> 2):
+                m.d.comb += self.dat_r.eq(self.fast_out_min)
+            with m.Case(ADDR_FAST_OUT_MAX >> 2):
+                m.d.comb += self.dat_r.eq(self.fast_out_max)
+            with m.Case(ADDR_FAST_OUT_SAFE >> 2):
+                m.d.comb += self.dat_r.eq(self.fast_out_safe)
+            with m.Case(ADDR_FAST_INT_LEAK >> 2):
+                m.d.comb += self.dat_r.eq(self.fast_int_leak)
+
+            with m.Case(ADDR_RAMP_MIN >> 2):
+                m.d.comb += self.dat_r.eq(self.ramp_min)
+            with m.Case(ADDR_RAMP_MAX >> 2):
+                m.d.comb += self.dat_r.eq(self.ramp_max)
+            with m.Case(ADDR_RAMP_STEP >> 2):
+                m.d.comb += self.dat_r.eq(self.ramp_step)
+            with m.Case(ADDR_RAMP_TICK_DIV >> 2):
+                m.d.comb += self.dat_r.eq(self.ramp_tick_div)
+            with m.Case(ADDR_RAMP_CENTER >> 2):
+                m.d.comb += self.dat_r.eq(self.ramp_center)
+            with m.Case(ADDR_RAMP_WIDTH >> 2):
+                m.d.comb += self.dat_r.eq(self.ramp_width)
+
+            with m.Case(ADDR_AUTOLOCK_WINDOW_MIN >> 2):
+                m.d.comb += self.dat_r.eq(self.autolock_window_min)
+            with m.Case(ADDR_AUTOLOCK_WINDOW_MAX >> 2):
+                m.d.comb += self.dat_r.eq(self.autolock_window_max)
+            with m.Case(ADDR_AUTOLOCK_EXPECTED_MIN_X >> 2):
+                m.d.comb += self.dat_r.eq(self.autolock_expected_min_x)
+            with m.Case(ADDR_AUTOLOCK_EXPECTED_MAX_X >> 2):
+                m.d.comb += self.dat_r.eq(self.autolock_expected_max_x)
+            with m.Case(ADDR_AUTOLOCK_LOCK_X >> 2):
+                m.d.comb += self.dat_r.eq(self.autolock_lock_x)
+            with m.Case(ADDR_AUTOLOCK_AMP_MIN >> 2):
+                m.d.comb += self.dat_r.eq(self.autolock_amp_min)
+            with m.Case(ADDR_AUTOLOCK_WIDTH_MIN >> 2):
+                m.d.comb += self.dat_r.eq(self.autolock_width_min)
+            with m.Case(ADDR_AUTOLOCK_WIDTH_MAX >> 2):
+                m.d.comb += self.dat_r.eq(self.autolock_width_max)
+            with m.Case(ADDR_AUTOLOCK_SLOPE_SIGN >> 2):
+                m.d.comb += self.dat_r.eq(self.autolock_slope_sign)
+            with m.Case(ADDR_AUTOLOCK_RETRY_LIMIT >> 2):
+                m.d.comb += self.dat_r.eq(self.autolock_retry_limit)
+
+            # --- Error calculation ---
+            with m.Case(ADDR_ERROR_SETPOINT >> 2):
+                m.d.comb += self.dat_r.eq(self.error_setpoint)
+            with m.Case(ADDR_ERROR_OFFSET >> 2):
+                m.d.comb += self.dat_r.eq(self.error_offset)
+
+            # --- ADC configuration ---
+            with m.Case(ADDR_ADC_CONFIG >> 2):
+                m.d.comb += self.dat_r.eq(
+                    Cat(self.adc_format_mode, self.adc_fault_enable))
+            with m.Case(ADDR_ADC_GUARD_COUNT >> 2):
+                m.d.comb += self.dat_r.eq(self.adc_guard_count)
+
+            # --- Lock check / lock watch ---
+            with m.Case(ADDR_LOCK_CHECK_DELAY >> 2):
+                m.d.comb += self.dat_r.eq(self.lock_check_delay)
+            with m.Case(ADDR_LOCK_MAX_ERROR >> 2):
+                m.d.comb += self.dat_r.eq(self.lock_error_max)
+            with m.Case(ADDR_LOCK_MAX_SAT_COUNT >> 2):
+                m.d.comb += self.dat_r.eq(self.lock_max_sat_count)
+            with m.Case(ADDR_LOCK_ADC_TIMEOUT >> 2):
+                m.d.comb += self.dat_r.eq(self.lock_adc_timeout)
+            with m.Case(ADDR_LOCK_ERROR_TIMEOUT >> 2):
+                m.d.comb += self.dat_r.eq(self.lock_error_timeout)
+            with m.Case(ADDR_LOCK_JUMP_LIMIT >> 2):
+                m.d.comb += self.dat_r.eq(self.lock_jump_limit)
+            with m.Case(ADDR_LOCK_JUMP_WINDOW >> 2):
+                m.d.comb += self.dat_r.eq(self.lock_jump_window)
+            with m.Case(ADDR_LOCK_STATE_TIMEOUT >> 2):
+                m.d.comb += self.dat_r.eq(self.lock_state_timeout)
+            with m.Case(ADDR_LOCK_RELOCK_LIMIT >> 2):
+                m.d.comb += self.dat_r.eq(self.lock_relock_limit)
+
+            # --- DAC configuration ---
+            with m.Case(ADDR_DAC_CONFIG >> 2):
+                m.d.comb += self.dat_r.eq(
+                    Cat(self.dac_fast_offset_bin, self.dac_slow_offset_bin))
+
             with m.Default():
                 m.d.comb += self.dat_r.eq(0)
 

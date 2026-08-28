@@ -59,7 +59,7 @@ in lock_core_top, driven off the `locked` status. This module's
 selected otherwise.
 """
 
-from amaranth import Module, Signal, Elaboratable, Mux, signed
+from amaranth import Const, Module, Signal, Elaboratable, Mux, signed, unsigned
 import sys
 import os
 
@@ -106,6 +106,15 @@ class SlowRecenter(Elaboratable):
         self.slow_out       = Signal(signed(dac_w))  # clamped recenter contribution to DAC_SLOW
         self.slow_saturated = Signal()                # high if clamp is active (for lock_watch / fault_gate)
 
+        # AUDIT FIX (S1-10): the slow actuator limits and safe code live
+        # in this module's own register block, but the top level needs
+        # them to configure the slow DAC formatter and the lock watch.
+        # Previously they were internal only, which is part of why the
+        # slow path ended up with no limiter and no fault gate at all.
+        self.o_out_min  = Signal(signed(dac_w))
+        self.o_out_max  = Signal(signed(dac_w))
+        self.o_out_safe = Signal(signed(dac_w))
+
         # --- bus ---
         self.adr   = Signal(12)
         self.dat_w = Signal(32)
@@ -118,15 +127,36 @@ class SlowRecenter(Elaboratable):
 
         dac_w, gain_w, accum_w = self.dac_w, self.gain_w, self.accum_w
 
-        config     = Signal(32)
-        bias       = Signal(signed(dac_w), reset=0)
+        # AUDIT FIX (S3-7, part 1): SLOW_CTRL_CONFIG reset to 0, so
+        # tick_div_shift was 0, so slow_tick fired on EVERY sample_valid.
+        # With adc_valid tied high in the board wrapper that is 125 MHz:
+        # this "slow" loop ran at the full fast-loop rate. The module's
+        # own docstring says it "must never run at the 1 MHz fast-loop
+        # rate" and packet 8.11 says "The update rate should be slow
+        # compared with the fast loop". A slow loop running faster than
+        # the fast loop it is correcting is a stability problem.
+        #
+        # Default the tick-divider field to 2^12 (~33 us at 125 MHz) so
+        # an unconfigured system is slow by default, not fast by default.
+        DEFAULT_TICK_DIV_SHIFT = 12
+        CONFIG_RESET = DEFAULT_TICK_DIV_SHIFT << SLOW_CFG_TICK_DIV_SHIFT
+
+        config     = Signal(32, init=CONFIG_RESET)
+        bias       = Signal(signed(dac_w), init=0)
         ki_unused  = Signal(signed(gain_w))  # SLOW_KI: register exists, not consumed here
         target     = Signal(signed(dac_w))
         gain       = Signal(signed(gain_w))
-        out_min    = Signal(signed(dac_w))
-        out_max    = Signal(signed(dac_w))
-        out_safe   = Signal(signed(dac_w))
-        slew_limit = Signal(dac_w, reset=256)  # unsigned magnitude
+        # AUDIT FIX (S3-7, part 2): out_min and out_max both reset to 0,
+        # so the clamp pinned the slow output at 0 and asserted
+        # slow_saturated for any nonzero command. That flag feeds
+        # lock_watch -> saturation_bad -> fault_request, so enabling
+        # recentering before writing the limits would fault the system
+        # within microseconds. Default to a conservative symmetric range
+        # matching the fast path's +/-3200 convention.
+        out_min    = Signal(signed(dac_w), init=-3200)
+        out_max    = Signal(signed(dac_w), init=3200)
+        out_safe   = Signal(signed(dac_w), init=0)
+        slew_limit = Signal(dac_w, init=256)  # unsigned magnitude
 
         accumulator  = Signal(signed(accum_w))
         slow_current = Signal(signed(dac_w))
@@ -162,24 +192,57 @@ class SlowRecenter(Elaboratable):
                 with m.Case(ADDR_SLOW_SLEW_LIMIT >> 2):
                     m.d.sync += slew_limit.eq(self.dat_w[:dac_w])
                 with m.Case(ADDR_SLOW_OUT_CURRENT >> 2):
-                    # writing here is the accum_load data source
-                    # (paired with the accum_load config bit), letting
-                    # the PC/lock_fsm hand off a known-good starting
-                    # point without an output jump (section 9.3).
-                    m.d.sync += accumulator.eq(
-                        self.dat_w[:dac_w].as_signed() << GAIN_FRAC
-                    )
+                    # Writing here is the accum_load data source (paired
+                    # with the accum_load config bit), letting the
+                    # PC/lock_fsm hand off a known-good starting point
+                    # without an output jump (packet section 9.3).
+                    #
+                    # AUDIT FIX (S3-7, part 5): this write used to fire
+                    # UNCONDITIONALLY, whether or not accum_load was set,
+                    # on a register that register_defs.py and this
+                    # module's own docstring both document as read-only
+                    # ("0x124 SLOW_OUT_CURRENT R"). Any software that
+                    # swept the register block reading and writing back
+                    # would silently clobber the slow actuator state.
+                    #
+                    # Gated on accum_load now, so the register behaves as
+                    # documented unless the load path is explicitly armed.
+                    with m.If(accum_load):
+                        m.d.sync += accumulator.eq(
+                            self.dat_w[:dac_w].as_signed() << GAIN_FRAC
+                        )
 
         # ---------------- slow tick divider ----------------
-        tick_counter = Signal(SLOW_CFG_TICK_DIV_WIDTH)
+        #
+        # AUDIT FIX (S3-7, part 3): tick_counter was
+        # SLOW_CFG_TICK_DIV_WIDTH (8) bits while the reload value is
+        # (1 << tick_div_shift) - 1 with tick_div_shift an 8-bit field.
+        # Any shift above 8 truncated, so the maximum achievable division
+        # silently saturated at 256 samples (2 us at 125 MHz) instead of
+        # the 2^tick_div_shift the docstring promises.
+        #
+        # The counter is now wide enough for the full field, and the
+        # shift is clamped to what the counter can actually represent so
+        # the behaviour is explicit rather than emergent.
+        TICK_COUNTER_W = 32
+        MAX_TICK_SHIFT = TICK_COUNTER_W - 1
+
+        shift_clamped = Signal(range(MAX_TICK_SHIFT + 1))
+        with m.If(tick_div_shift > MAX_TICK_SHIFT):
+            m.d.comb += shift_clamped.eq(MAX_TICK_SHIFT)
+        with m.Else():
+            m.d.comb += shift_clamped.eq(tick_div_shift)
+
+        tick_counter = Signal(TICK_COUNTER_W)
         slow_tick    = Signal()
         m.d.comb += slow_tick.eq(self.sample_valid & (tick_counter == 0))
         with m.If(self.sample_valid):
             with m.If(tick_counter == 0):
-                with m.If(tick_div_shift == 0):
+                with m.If(shift_clamped == 0):
                     m.d.sync += tick_counter.eq(0)
                 with m.Else():
-                    m.d.sync += tick_counter.eq((1 << tick_div_shift) - 1)
+                    m.d.sync += tick_counter.eq(
+                        (Const(1, unsigned(TICK_COUNTER_W)) << shift_clamped) - 1)
             with m.Else():
                 m.d.sync += tick_counter.eq(tick_counter - 1)
 
@@ -192,9 +255,22 @@ class SlowRecenter(Elaboratable):
         m.d.comb += product.eq(fast_err * gain)  # already in Q(GAIN_FRAC) since gain is Q(GAIN_FRAC)
 
         # slew-limit the per-tick delta (same Q(GAIN_FRAC) domain as accumulator)
+        # AUDIT FIX (S3-7, part 4): this used to be
+        #     delta_limit.eq(slew_limit.as_signed() << GAIN_FRAC)
+        # but slew_limit is an UNSIGNED magnitude register. Reinterpreting
+        # its bits as signed made any value >= 32768 NEGATIVE, so
+        # delta_limit went negative, `product > delta_limit` became true
+        # for most positive products, and delta_final took a negative
+        # bound. The correction reversed sign and the slow loop became
+        # positive feedback. The bus accepts dat_w[:16], so software could
+        # legally write such a value.
+        #
+        # Zero-extend the unsigned magnitude instead of reinterpreting it.
         delta_limit = Signal(signed(accum_w))
         delta_final = Signal(signed(accum_w))
-        m.d.comb += delta_limit.eq(slew_limit.as_signed() << GAIN_FRAC)
+        slew_ext    = Signal(accum_w)
+        m.d.comb += slew_ext.eq(slew_limit)          # zero-extend, stays >= 0
+        m.d.comb += delta_limit.eq(slew_ext << GAIN_FRAC)
         with m.If(product > delta_limit):
             m.d.comb += delta_final.eq(delta_limit)
         with m.Elif(product < -delta_limit):
@@ -231,6 +307,9 @@ class SlowRecenter(Elaboratable):
         m.d.comb += [
             self.slow_out.eq(slow_current),
             self.slow_saturated.eq(saturated),
+            self.o_out_min.eq(out_min),
+            self.o_out_max.eq(out_max),
+            self.o_out_safe.eq(out_safe),
         ]
 
         # ---------------- bus read decode ----------------

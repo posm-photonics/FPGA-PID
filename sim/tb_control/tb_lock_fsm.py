@@ -124,10 +124,18 @@ def test_full_lock_sequence():
         assert ctx.get(dut.trace_enable) == 1
 
         # ZOOM_SCAN -> FEATURE_VERIFY
+        #
+        # AUDIT FIX: this used to assert zoom_scan_enable == 0 in
+        # FEATURE_VERIFY. That was the bug, not the spec: the zoom ramp
+        # stopped at exactly the moment the autolock was switched on, so
+        # the verifier had no scan data to track and the error signal
+        # went static underneath it. Packet 8.10 puts them together --
+        # "1. Run zoom scan over selected window. 2. Track local
+        # extrema." The scan therefore continues through FEATURE_VERIFY.
         ctx.set(dut.zoom_complete, 1)
         await ctx.tick()
         ctx.set(dut.zoom_complete, 0)
-        assert ctx.get(dut.zoom_scan_enable) == 0
+        assert ctx.get(dut.zoom_scan_enable) == 1
         assert ctx.get(dut.autolock_enable) == 1
 
         # FEATURE_VERIFY -> ARM_LOCK

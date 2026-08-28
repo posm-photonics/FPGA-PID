@@ -136,6 +136,34 @@ class LockFSM(Elaboratable):
         self.relock_request = Signal()
 
         # -------------------------------------------------------------
+        # AUDIT FIX (S1-5): timeout and retry limits
+        #
+        # Every waiting state used to wait FOREVER. WIDE_SCAN, ZOOM_SCAN,
+        # FEATURE_VERIFY and ARM_LOCK each had exactly one exit condition
+        # and no escape if it never arrived. ARM_LOCK is the dangerous
+        # one: it asserts feedback_enable while asserting NO watchdog
+        # (lock_watch_enable is not set there), so the servo could run
+        # unsupervised indefinitely waiting for a condition that would
+        # never be met. Observed in simulation: the FSM sat in WIDE_SCAN
+        # for an entire 400,000-cycle run with no way out.
+        #
+        # `state_timeout` counts fast-domain cycles spent in a state that
+        # waits on FPGA-internal progress. 0 disables the timeout.
+        #
+        # Deliberately NOT applied to TRACE_READY / USER_SELECT: those
+        # wait on a human selecting a feature (packet 9.2 step 2), which
+        # is an indefinite wait by design.
+        # -------------------------------------------------------------
+        self.state_timeout = Signal(32, init=1 << 28)   # ~2.1 s at 125 MHz
+
+        # Bound on the RELOCK_SCAN -> ZOOM_SCAN -> FEATURE_VERIFY ->
+        # RELOCK_SCAN cycle, which was previously unbounded: a feature
+        # that never verified spun that loop forever with no counter and
+        # no escalation, and AUTOLOCK_RETRY_LIMIT existed in the register
+        # map without the FSM ever consulting it. 0 disables the limit.
+        self.relock_limit = Signal(8, init=8)
+
+        # -------------------------------------------------------------
         # Outputs
         # -------------------------------------------------------------
 
@@ -162,6 +190,12 @@ class LockFSM(Elaboratable):
 
         # Fault state output
         self.fault_state = Signal()
+
+        # Diagnostics for why the FSM gave up. Both are levels, held
+        # until the fault is cleared, so software can tell a timeout
+        # apart from an external interlock in FAULT_STATUS.
+        self.timeout_fault = Signal()
+        self.relock_exhausted = Signal()
 
         # Asserted whenever a hold is actually in effect (i.e.
         # hold_request is high and it's not being overridden by a
@@ -193,22 +227,100 @@ class LockFSM(Elaboratable):
             (state != LockState.FAULT)
         )
 
+        # ===============================================================
+        # Output decode -- SINGLE SOURCE (audit fix S3-11)
+        #
+        # The outputs used to be decoded TWICE: once here from state
+        # comparisons, and again at the bottom of elaborate() in an
+        # m.Switch. In Amaranth the later assignment wins wherever its
+        # condition holds, so the Switch silently overrode this block.
+        # The two disagreed on trace_enable (this block asserted it only
+        # in WIDE_SCAN; the Switch also asserted it in ZOOM_SCAN, and the
+        # Switch won). Duplicated logic where one copy is a silent
+        # override is a maintenance trap: editing the "wrong" copy has no
+        # effect and looks like a tool bug.
+        #
+        # Kept the Switch's effective behaviour (trace capture runs in
+        # both scan states, which is what the GUI needs to plot a zoom
+        # trace) and deleted the duplicate.
+        # ===============================================================
         m.d.comb += [
             self.fault_state.eq(state == LockState.FAULT),
             self.wide_scan_enable.eq(state == LockState.WIDE_SCAN),
-            self.zoom_scan_enable.eq(state == LockState.ZOOM_SCAN),
-            self.trace_enable.eq(state == LockState.WIDE_SCAN),
-            self.autolock_enable.eq(state == LockState.FEATURE_VERIFY),
+            # AUDIT FIX: the zoom ramp used to run ONLY in ZOOM_SCAN
+            # while the autolock was enabled ONLY in FEATURE_VERIFY, so
+            # the verifier was switched on at exactly the moment the scan
+            # stopped. With the ramp disabled it parks at active_min, the
+            # error signal goes static, and the autolock sits there with
+            # no data to track. Packet 8.10 puts them together: "1. Run
+            # zoom scan over selected window. 2. Track local extrema."
+            #
+            # This was masked before the S2-7 enable fix, because the
+            # autolock had no enable at all and free-ran on the wide
+            # scan, so it appeared to work for the wrong reason.
+            self.zoom_scan_enable.eq(
+                (state == LockState.ZOOM_SCAN)
+                | (state == LockState.FEATURE_VERIFY)
+            ),
+            self.trace_enable.eq(
+                (state == LockState.WIDE_SCAN)
+                | (state == LockState.ZOOM_SCAN)
+                | (state == LockState.FEATURE_VERIFY)
+            ),
+            # Enabled across both zoom states so the tracker sees the
+            # whole sweep and its result survives the state transition.
+            self.autolock_enable.eq(
+                (state == LockState.ZOOM_SCAN)
+                | (state == LockState.FEATURE_VERIFY)
+            ),
             self.feedback_enable.eq(
                 (state == LockState.ARM_LOCK)
                 | (state == LockState.LOCKED)
                 | (state == LockState.LOCK_WATCH)
             ),
+            # AUDIT FIX (S1-5): ARM_LOCK asserts feedback_enable, so it
+            # must also be watched. Previously the servo ran in ARM_LOCK
+            # with no watchdog at all.
             self.lock_watch_enable.eq(
-                (state == LockState.LOCKED)
+                (state == LockState.ARM_LOCK)
+                | (state == LockState.LOCKED)
                 | (state == LockState.LOCK_WATCH)
             ),
         ]
+
+        # =============================================================
+        # Timeout / relock bookkeeping (audit fix S1-5)
+        # =============================================================
+        dwell        = Signal(32)
+        relock_count = Signal(8)
+
+        # States that wait on FPGA-internal progress, and so must not be
+        # allowed to wait forever. TRACE_READY and USER_SELECT are
+        # excluded: they wait on a human.
+        timed_state = Signal()
+        m.d.comb += timed_state.eq(
+            (state == LockState.WIDE_SCAN)
+            | (state == LockState.ZOOM_SCAN)
+            | (state == LockState.FEATURE_VERIFY)
+            | (state == LockState.ARM_LOCK)
+            | (state == LockState.RELOCK_SCAN)
+        )
+
+        timed_out = Signal()
+        m.d.comb += timed_out.eq(
+            timed_state
+            & (self.state_timeout != 0)
+            & (dwell >= self.state_timeout)
+        )
+
+        # The dwell counter restarts on every state change and is frozen
+        # while held, so a hold does not burn the timeout budget.
+        state_prev = Signal(LockState, init=LockState.IDLE)
+        m.d.sync += state_prev.eq(state)
+        with m.If(state != state_prev):
+            m.d.sync += dwell.eq(0)
+        with m.Elif(timed_state & ~self.hold_request & ~timed_out):
+            m.d.sync += dwell.eq(dwell + 1)
 
         # =============================================================
         # Fault priority logic
@@ -221,9 +333,42 @@ class LockFSM(Elaboratable):
         with m.Elif(state == LockState.FAULT):
 
             with m.If(self.fault_clear_request):
-                m.d.sync += state.eq(
-                    LockState.IDLE
-                )
+                m.d.sync += [
+                    state.eq(LockState.IDLE),
+                    self.timeout_fault.eq(0),
+                    self.relock_exhausted.eq(0),
+                    relock_count.eq(0),
+                ]
+
+
+        # =============================================================
+        # Global enable (audit fix S3-4)
+        #
+        # global_enable used to be consulted ONLY on the IDLE ->
+        # WIDE_SCAN transition. Clearing it while locked left the FSM in
+        # LOCKED with feedback_enable still asserted, so the master
+        # enable did not actually disable the servo. It now returns the
+        # sequencer to IDLE from any non-fault state, which drops
+        # feedback_enable through the normal output decode.
+        # =============================================================
+
+        with m.Elif(~self.global_enable):
+            m.d.sync += state.eq(LockState.IDLE)
+
+
+        # =============================================================
+        # Acquisition timeout
+        #
+        # Escalates to FAULT rather than silently retrying, because
+        # packet 10.2 requires deliberate handling: a scan or arm step
+        # that never completes is a real failure, not a transient.
+        # =============================================================
+
+        with m.Elif(timed_out):
+            m.d.sync += [
+                state.eq(LockState.FAULT),
+                self.timeout_fault.eq(1),
+            ]
 
 
         # =============================================================
@@ -313,9 +458,13 @@ class LockFSM(Elaboratable):
 
 
         with m.Elif(state == LockState.LOCKED):
-            m.d.sync += state.eq(
-                LockState.LOCK_WATCH
-            )
+            m.d.sync += [
+                state.eq(LockState.LOCK_WATCH),
+                # A lock was achieved: the relock budget refills, so a
+                # long run that occasionally relocks legitimately does
+                # not slowly exhaust it and fault.
+                relock_count.eq(0),
+            ]
 
 
         with m.Elif(state == LockState.LOCK_WATCH):
@@ -329,59 +478,34 @@ class LockFSM(Elaboratable):
             # Relock policy is configured elsewhere: FEATURE_VERIFY
             # This state represents:
             # "begin acquisition again"
-            m.d.sync += state.eq(
-                LockState.ZOOM_SCAN
-            )
+            #
+            # AUDIT FIX (S1-5): this transition used to be unconditional
+            # with no counter, so RELOCK_SCAN -> ZOOM_SCAN ->
+            # FEATURE_VERIFY -> (autolock_failed) -> RELOCK_SCAN spun
+            # forever on a feature that never verified. Bounded now, and
+            # escalated to FAULT once the budget is spent so a failure to
+            # reacquire is visible instead of silent.
+            with m.If((self.relock_limit != 0)
+                      & (relock_count >= self.relock_limit)):
+                m.d.sync += [
+                    state.eq(LockState.FAULT),
+                    self.relock_exhausted.eq(1),
+                ]
+            with m.Else():
+                m.d.sync += [
+                    relock_count.eq(relock_count + 1),
+                    state.eq(LockState.ZOOM_SCAN),
+                ]
 
 
         # =============================================================
         # Output decoding
+        #
+        # AUDIT FIX (S3-11): a second m.Switch output decode used to live
+        # here, duplicating the comb block near the top of elaborate()
+        # and silently overriding it wherever the two disagreed. It has
+        # been removed; the single decode above is now the only source of
+        # these outputs.
         # =============================================================
-
-        with m.Switch(state):
-
-            with m.Case(LockState.WIDE_SCAN):
-                m.d.comb += [
-                    self.wide_scan_enable.eq(1),
-                    self.trace_enable.eq(1),
-                ]
-
-
-            with m.Case(LockState.ZOOM_SCAN):
-                m.d.comb += [
-                    self.zoom_scan_enable.eq(1),
-                    self.trace_enable.eq(1),
-                ]
-
-
-            with m.Case(LockState.FEATURE_VERIFY):
-                m.d.comb += [
-                    self.autolock_enable.eq(1),
-                ]
-
-
-            with m.Case(LockState.ARM_LOCK):
-                m.d.comb += [
-                    self.feedback_enable.eq(1),
-                ]
-
-
-            with m.Case(LockState.LOCKED):
-                m.d.comb += [
-                    self.feedback_enable.eq(1),
-                ]
-
-
-            with m.Case(LockState.LOCK_WATCH):
-                m.d.comb += [
-                    self.feedback_enable.eq(1),
-                    self.lock_watch_enable.eq(1),
-                ]
-
-
-            with m.Case(LockState.FAULT):
-                m.d.comb += [
-                    self.fault_state.eq(1),
-                ]
 
         return m

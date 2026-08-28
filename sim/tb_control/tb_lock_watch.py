@@ -107,12 +107,19 @@ async def healthy_inputs(ctx, dut):
     ctx.set(dut.lock_active, 1)
     ctx.set(dut.error_value, 10)
     ctx.set(dut.max_error, 500)
-    ctx.set(dut.fast_output, 30000)
-    ctx.set(dut.fast_min, 1000)
-    ctx.set(dut.fast_max, 64000)
-    ctx.set(dut.slow_output, 30000)
-    ctx.set(dut.slow_min, 1000)
-    ctx.set(dut.slow_max, 64000)
+    # AUDIT FIX (S3-6): these were unsigned DAC codes (mid-rail 30000,
+    # limits 1000..64000). The DAC monitor ports are signed now, because
+    # the controller domain is signed throughout and the old unsigned
+    # comparison asserted fast_rail_warning whenever the two's-complement
+    # output sat at 0 or -1, i.e. exactly where a healthy servo sits.
+    # Restated in the signed convention: mid-rail is 0, limits are
+    # symmetric about it.
+    ctx.set(dut.fast_output, 0)
+    ctx.set(dut.fast_min, -30000)
+    ctx.set(dut.fast_max, 30000)
+    ctx.set(dut.slow_output, 0)
+    ctx.set(dut.slow_min, -30000)
+    ctx.set(dut.slow_max, 30000)
     ctx.set(dut.fast_saturated, 0)
     ctx.set(dut.slow_saturated, 0)
     ctx.set(dut.adc_valid, 1)
@@ -175,12 +182,12 @@ def test_rail_warnings_are_immediate():
         await healthy_inputs(ctx, dut)
         await ctx.tick()
 
-        ctx.set(dut.fast_output, 64000)  # == fast_max
+        ctx.set(dut.fast_output, 30000)  # == fast_max
         await ctx.tick()
         assert ctx.get(dut.fast_rail_warning) == 1
 
-        ctx.set(dut.fast_output, 30000)
-        ctx.set(dut.slow_output, 1000)  # == slow_min
+        ctx.set(dut.fast_output, 0)
+        ctx.set(dut.slow_output, -30000)  # == slow_min
         await ctx.tick()
         assert ctx.get(dut.slow_rail_warning) == 1
 
@@ -289,7 +296,7 @@ def test_sudden_dac_jump_triggers_relock():
         for _ in range(3):
             await ctx.tick()  # let previous_fast settle at a stable value
 
-        ctx.set(dut.fast_output, 30000 + 5000)  # jump >> jump_limit(200)
+        ctx.set(dut.fast_output, 0 + 5000)  # jump >> jump_limit(200)
         found = await wait_until(ctx, dut.relock_request, 1, max_cycles=4)
         assert found, "relock_request never asserted for a large single-cycle DAC jump"
         assert ctx.get(dut.unlock_detected) == 1

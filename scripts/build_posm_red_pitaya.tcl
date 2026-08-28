@@ -17,9 +17,11 @@
 #
 #   1. Cloned the official FPGA sources next to this repo:
 #        git clone https://github.com/RedPitaya/RedPitaya-FPGA.git
-#      (or a known-good fork/tag -- pin a specific commit/tag rather than
-#      floating on `master`, so a future upstream change can't silently
-#      break this build)
+#        cd RedPitaya-FPGA && git checkout <PIN A SPECIFIC TAG HERE>
+#      Pin a specific commit/tag rather than floating on `master`. This
+#      is not just hygiene: see WARNING 3 below -- the safety of the
+#      whole register path rests on which clock domain that revision
+#      puts the sys_* bus in.
 #
 #   2. Generated this project's Verilog:
 #        python3 build/generate_verilog.py
@@ -44,10 +46,11 @@
 #                            existing dac_a_sum wiring for the pattern */ ),
 #          .o_dac_dat_b ( /* likewise for dac_b */ ),
 #          .i_external_interlock ( exp_p_in[1] ),  // pick a free exp pin
-#          .i_feature_selected   ( 1'b1 ),
+#          .i_feature_selected   ( exp_p_in[2] ),  // see WARNING below
 #          .o_lock_state  ( led_o[3:0] ),
 #          .o_lock_fault  ( led_o[4]   ),
 #          .o_trace_ready ( led_o[5]   ),
+#          .o_heartbeat   ( led_o[6]   ),  // see WARNING below
 #          .sys_addr  ( sys_addr ), .sys_wdata ( sys_wdata ), .sys_sel ( sys_sel ),
 #          .sys_wen   ( sys_wen[6] ), .sys_ren  ( sys_ren[6] ),
 #          .sys_rdata ( sys_rdata[6*32+31:6*32] ),
@@ -57,6 +60,42 @@
 #      Double-check the exact `adc_dat_a`/`adc_dat_b`/DAC-summing net names
 #      against whatever red_pitaya_top.v revision you're actually on --
 #      they've shifted between Red Pitaya firmware releases.
+#
+#      ------------------------------------------------------------------
+#      WARNINGS FROM THE PRE-SHIP AUDIT -- read before wiring
+#      ------------------------------------------------------------------
+#      1. i_feature_selected was previously suggested as `1'b1`. DO NOT
+#         DO THAT. lock_fsm leaves WIDE_SCAN on
+#         (trace_ready | feature_selected), so tying it high skips the
+#         wide scan and the trace capture entirely in one cycle and
+#         jumps straight to a zoom scan around ramp_center. The whole
+#         acquisition sequence in packet 9.2 is defeated.
+#
+#         Strictly, this signal should not be a pin at all: packet 9.2
+#         step 2 makes feature selection a PC action after the operator
+#         clicks the trace. There is no register for it yet. Until there
+#         is, drive it from a spare exp pin (or tie it LOW and drive the
+#         sequence from trace_ready).
+#
+#      2. .rst( ~adc_rstn ) -- CHECK THE INVERSION. The core uses a
+#         synchronous, active-HIGH reset. Get this backwards and the
+#         entire core sits in reset reading zeros, which from the bench
+#         is indistinguishable from a broken register map. That is what
+#         o_heartbeat is for: it is a free-running counter bit, so an LED
+#         that blinks proves the core is clocked and out of reset before
+#         you debug anything else.
+#
+#      3. The sys_* register bus is assumed to be in the adc_clk domain.
+#         That is true for RedPitaya-FPGA v0.94, where red_pitaya_ps
+#         presents the bus on adc_clk, but this repo does not pin a
+#         commit and does not verify it. If a different revision presents
+#         sys_* on clk_fpga_0 instead, the 32-bit write data crosses two
+#         asynchronous 125 MHz clocks with NO synchroniser, and the
+#         constraints file already contains
+#             set_false_path -from [get_clocks clk_fpga_0] -to [get_clocks adc_clk]
+#         which tells the tool not to check it. Torn register writes
+#         would follow. PIN THE COMMIT and confirm the domain in the
+#         netlist before the first bitstream.
 #
 # USAGE:
 #   vivado -mode batch -source scripts/build_posm_red_pitaya.tcl \

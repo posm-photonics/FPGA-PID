@@ -79,15 +79,59 @@ class DemodLowpass(Elaboratable):
     def elaborate(self, platform):
         m = Module()
 
-        # Accumulator (the filter state)
+        # ===================================================================
+        # AUDIT FIX (S2-2)
+        # ===================================================================
+        # The previous version accumulated at INPUT scale and read the
+        # LOW bits of the accumulator:
+        #
+        #     x_ext      = sample_in                 # no upscaling
+        #     update     = diff >> alpha_shift       # floor division
+        #     acc       += update
+        #     sample_out = acc[:out_w]               # low bits
+        #
+        # When 0 <= diff < 2^alpha the update floored to zero and the
+        # accumulator simply STOPPED, so the filter settled short of its
+        # input by up to 2^alpha - 1 counts. Measured on the previous
+        # version, for a step input of 10000:
+        #
+        #     alpha_shift    final output    gap
+        #          4              9985        15
+        #          8              9745       255
+        #         12              5905      4095   (41% amplitude error)
+        #
+        # sim/tb_dsp/tb_demod_lowpass.py already failed on this
+        # ("Expected 10000, got 9973") and the red test was committed.
+        #
+        # The module header already described the correct design ("The
+        # accumulator is wider than the input to preserve precision
+        # through the repeated right-shift operations. The output is
+        # taken from the upper bits of the accumulator") -- it simply was
+        # never implemented. The 20 bits of headroom that were meant to
+        # hold the fractional residual went unused.
+        #
+        # Corrected: the accumulator carries `frac` fractional bits below
+        # the input LSB, the update is rounded rather than floored, and
+        # the output is taken from the upper bits with rounding. The dead
+        # zone becomes 2^(alpha-frac) output LSBs, below one LSB for
+        # every supported alpha.
+        #
+        # Same structural point as the PI integrator fix (S1-2), and the
+        # same structure Linien uses in its filter path.
+        # ===================================================================
+
+        frac = self.acc_w - self.out_w      # 20 fractional bits by default
+
+        # Accumulator (the filter state), Q(frac) relative to the input
         acc = Signal(signed(self.acc_w))
 
-        # Extend input to accumulator width for arithmetic
+        # Extend AND upscale the input into accumulator precision
         x_ext = Signal(signed(self.acc_w))
-        m.d.comb += x_ext.eq(self.sample_in)
+        m.d.comb += x_ext.eq(self.sample_in << frac)
 
-        # Difference: x[n] - y[n-1] (in accumulator precision)
-        diff = Signal(signed(self.acc_w))
+        # Difference: x[n] - y[n-1] (in accumulator precision).
+        # One extra bit: x_ext and acc can sit at opposite extremes.
+        diff = Signal(signed(self.acc_w + 1))
         m.d.comb += diff.eq(x_ext - acc)
 
         # Clamp alpha_shift to a safe range
@@ -97,10 +141,44 @@ class DemodLowpass(Elaboratable):
         with m.Else():
             m.d.comb += alpha_clamped.eq(self.alpha_shift)
 
-        # IIR update: acc += diff >> alpha_shift
-        # We use a barrel shifter (variable shift).
-        update = Signal(signed(self.acc_w))
-        m.d.comb += update.eq(diff >> alpha_clamped)
+        # Round-to-nearest constant for the variable shift:
+        # 2^(alpha-1), or 0 when alpha == 0 (the shift is a no-op).
+        # alpha_minus_1 is kept UNSIGNED: Amaranth rejects a signed shift
+        # amount, and `alpha_clamped - 1` is signed. Only evaluated where
+        # alpha_clamped >= 1, so the subtraction cannot underflow.
+        alpha_minus_1 = Signal(5)
+        m.d.comb += alpha_minus_1.eq(alpha_clamped - 1)
+
+        round_add = Signal(signed(self.acc_w + 1))
+        with m.If(alpha_clamped == 0):
+            m.d.comb += round_add.eq(0)
+        with m.Else():
+            m.d.comb += round_add.eq(
+                Const(1, unsigned(self.acc_w)) << alpha_minus_1)
+
+        # IIR update: acc += round(diff / 2^alpha)
+        update = Signal(signed(self.acc_w + 1))
+        m.d.comb += update.eq((diff + round_add) >> alpha_clamped)
+
+        # Output: take the UPPER bits, with round-to-nearest.
+        out_round = Signal(signed(self.acc_w + 1))
+        if frac > 0:
+            m.d.comb += out_round.eq((acc + (1 << (frac - 1))) >> frac)
+        else:
+            m.d.comb += out_round.eq(acc)
+
+        # The accumulator is bounded by the input range, so out_round
+        # normally fits out_w. Clamp anyway: in_w and out_w are separate
+        # parameters and a caller may legitimately set in_w > out_w.
+        out_max = (1 << (self.out_w - 1)) - 1
+        out_min = -(1 << (self.out_w - 1))
+        out_clamped = Signal(signed(self.out_w))
+        with m.If(out_round > out_max):
+            m.d.comb += out_clamped.eq(out_max)
+        with m.Elif(out_round < out_min):
+            m.d.comb += out_clamped.eq(out_min)
+        with m.Else():
+            m.d.comb += out_clamped.eq(out_round)
 
         # --- State update ---
         with m.If(self.reset_filter):
@@ -112,11 +190,7 @@ class DemodLowpass(Elaboratable):
         with m.Elif(self.sample_valid):
             m.d.sync += [
                 acc.eq(acc + update),
-                # Output: take the full accumulator truncated to out_w.
-                # Since acc and input have the same integer scaling (no
-                # fractional shift between them), we just take the lower
-                # out_w bits with saturation-like truncation.
-                self.sample_out.eq(acc[:self.out_w].as_signed()),
+                self.sample_out.eq(out_clamped),
                 self.out_valid.eq(1),
             ]
         with m.Else():

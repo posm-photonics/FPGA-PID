@@ -77,10 +77,19 @@ Run directly with: python3 tb_robust_autolock.py
 """
 
 import os
+import sys
+
+# AUDIT FIX: this testbench had no sys.path bootstrap and could not
+# be run standalone ("ModuleNotFoundError: No module named 'rtl'"),
+# contradicting README.md's claim that the repo "can be cloned and
+# simulated without hidden local paths".
+sys.path.insert(0, os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..")))
+import os
 
 from amaranth.sim import Simulator
 
-from robust_autolock import RobustAutoLock, AutoLockState
+from rtl.autolock.robust_autolock import RobustAutoLock, AutoLockState
 
 
 WINDOW_MIN = 10

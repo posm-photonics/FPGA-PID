@@ -17,7 +17,25 @@ rtl/control/trace_capture.py's own register blocks. If you change an
 address in the RTL, change it here too -- see the docstring at the top
 of protocol.py for the same warning.
 
-IMPORTANT STATUS NOTE (read this before wiring up real hardware):
+PRE-SHIP AUDIT NOTE (2026-08-28)
+The FPGA-side readback gap described below is FIXED: register_bank.py
+now has a read decode for every R/W register, so these parameters read
+back correctly. The ADDRESS DIVERGENCE is NOT fixed and still needs a
+decision -- see rtl/bus/register_defs.py. The relocated block at
+0x020-0x070 overlaps the range packet section 11.2 reserves for ADC
+configuration (0x040-0x068), so the ADC block had to be parked at 0x0A0.
+Either move this block back to canonical addresses (invalidating every
+existing bitstream and this file at the same time) or amend the packet.
+
+Newly added register groups, all readable and writable:
+  error calc      ERROR_SETPOINT / ERROR_OFFSET   (packet 11.3)
+  ADC config      ADC_CONFIG / ADC_GUARD_COUNT
+  fast controller FAST_INT_LEAK                   (packet 11.4)
+  lock watch      the five thresholds that used to be hardcoded
+                  constants in lock_core_top      (packet 11.9)
+  DAC config      DAC_CONFIG                      (packet 11.10)
+
+ORIGINAL STATUS NOTE (kept for history; the readback half is resolved):
 Three groups of parameters below (FAST_*, RAMP_*, AUTOLOCK_*) point at
 register addresses (0x020-0x070) that did NOT exist in the FPGA
 register map until this GUI project added them (see the "added for
@@ -269,6 +287,85 @@ _register_all([
     _reg("lock_error_max", R.ADDR_LOCK_ERROR_MAX, "fast_loop",
          "Maximum absolute error accepted by the hardware lock-quality check",
          width=24, min_value=0, max_value=(1 << 24) - 1),
+
+    # ---------------------------------------------------------------
+    # Error calculation (packet 11.3)
+    #
+    # AUDIT FIX: error_calc's offset and setpoint used to be hardwired
+    # to zero in lock_core_top with no registers behind them. Packet 4.3
+    # Eq. 13 defines the error as p*(x - ERROR_OFFSET - ERROR_SETPOINT),
+    # and the PC is supposed to compute the y-offset from the selected
+    # feature (packet 9.2 step 3). Without it the zero crossing is not
+    # at zero error and the servo holds the wrong point.
+    # ---------------------------------------------------------------
+    _reg("error_setpoint", R.ADDR_ERROR_SETPOINT, "fast_loop",
+         "Desired lock error, usually zero after offset correction",
+         width=20, signed=True),
+    _reg("error_offset", R.ADDR_ERROR_OFFSET, "fast_loop",
+         "DC/background offset subtracted from the ADC sample",
+         width=20, signed=True),
+
+    # ---------------------------------------------------------------
+    # ADC configuration
+    # ---------------------------------------------------------------
+    _bit("adc_format_mode", R.ADDR_ADC_CONFIG, R.ADC_CFG_FORMAT_MODE,
+         "adc", "0 = offset binary, 1 = two's complement passthrough"),
+    _bit("adc_fault_enable", R.ADDR_ADC_CONFIG, R.ADC_CFG_FAULT_ENABLE,
+         "adc", "Allow ADC overrange / missing-valid to force a fault"),
+    _reg("adc_guard_count", R.ADDR_ADC_GUARD_COUNT, "adc",
+         "Consecutive unchanged samples before the stuck-ADC flag is raised",
+         width=16, min_value=0, max_value=65535),
+
+    # ---------------------------------------------------------------
+    # Fast controller extras (packet 11.4)
+    # ---------------------------------------------------------------
+    _reg("fast_int_leak", R.ADDR_FAST_INT_LEAK, "pi",
+         "Leaky-integrator shift; 0 disables the leak. The CTL200 AC "
+         "modulation input cannot carry DC authority, so a pure "
+         "accumulator winds up against an unresponsive actuator.",
+         width=5, min_value=0, max_value=31),
+
+    # ---------------------------------------------------------------
+    # Lock check / lock watch (packet 11.9)
+    #
+    # AUDIT FIX: all five of these were HARDCODED CONSTANTS in
+    # lock_core_top and appeared nowhere in the register map, so
+    # retuning the safety watchdog required a resynthesis. The old
+    # saturation timeout of 100 cycles (800 ns at 125 MHz) tripped on
+    # ordinary lock-acquisition transients.
+    # ---------------------------------------------------------------
+    _reg("lock_check_delay", R.ADDR_LOCK_CHECK_DELAY, "lock_watch",
+         "Samples the lock-quality condition must hold before lock is declared",
+         width=32, min_value=0),
+    _reg("lock_max_sat_count", R.ADDR_LOCK_MAX_SAT_COUNT, "lock_watch",
+         "Samples of continuous output saturation before a fault is raised",
+         width=32, min_value=0),
+    _reg("lock_adc_timeout", R.ADDR_LOCK_ADC_TIMEOUT, "lock_watch",
+         "Samples of missing ADC valid before an ADC fault is raised",
+         width=32, min_value=0),
+    _reg("lock_error_timeout", R.ADDR_LOCK_ERROR_TIMEOUT, "lock_watch",
+         "Samples of excess error before a relock is requested",
+         width=32, min_value=0),
+    _reg("lock_jump_limit", R.ADDR_LOCK_JUMP_LIMIT, "lock_watch",
+         "Maximum fast-output change per jump window before a relock is requested",
+         width=16, min_value=0, max_value=65535),
+    _reg("lock_jump_window", R.ADDR_LOCK_JUMP_WINDOW, "lock_watch",
+         "log2 of the jump comparison window in samples",
+         width=5, min_value=0, max_value=31),
+    _reg("lock_state_timeout", R.ADDR_LOCK_STATE_TIMEOUT, "lock_watch",
+         "Cycles an acquisition state may wait before escalating to fault; 0 disables",
+         width=32, min_value=0),
+    _reg("lock_relock_limit", R.ADDR_LOCK_RELOCK_LIMIT, "lock_watch",
+         "Relock attempts before escalating to fault; 0 disables the limit",
+         width=8, min_value=0, max_value=255),
+
+    # ---------------------------------------------------------------
+    # DAC configuration (packet 11.10)
+    # ---------------------------------------------------------------
+    _bit("dac_fast_offset_bin", R.ADDR_DAC_CONFIG, R.DAC_CFG_FAST_OFFSET_BIN,
+         "dac", "Fast DAC encoding: 0 = two's complement, 1 = offset binary"),
+    _bit("dac_slow_offset_bin", R.ADDR_DAC_CONFIG, R.DAC_CFG_SLOW_OFFSET_BIN,
+         "dac", "Slow DAC encoding: 0 = two's complement, 1 = offset binary"),
 ])
 
 # ---------------------------------------------------------------------

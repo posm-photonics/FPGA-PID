@@ -28,7 +28,25 @@
 #
 # N.B: Q3.14 is a fixed-point number format used to represent floating points.
 #
-# PICore latency: 2 clock cycles (unchanged)
+# PICore latency: 1 clock cycle, error_valid -> control_valid.
+#   (The previous header claimed 2. There is one registered stage; the
+#   multiply, the >>gain_frac scaling, the accumulator add and the
+#   limit comparison are all combinational ahead of it. Packet 7.3
+#   requires every fast-path module to declare its real valid-in ->
+#   valid-out latency, so this is now the measured number. That single
+#   combinational path is also the timing risk called out as S3-2: if
+#   synthesis cannot close 20x18 multiply + 40-bit add + 40-bit compare
+#   in 8 ns on the -1 part, add a DSP48 MREG here and re-declare the
+#   latency as 2.)
+#
+# WARNING -- RelayTuner / PIWithAutoTune are NOT part of the shipped
+# design. top/lock_core_top.py instantiates PICore directly. Nothing in
+# POSM_project_FPGALock.pdf asks for a relay auto-tuner. They are kept
+# here only because sim/tb_dsp/tb_pi_controller.py imports them; the
+# defects found in the audit have been fixed, but this code has never
+# run on hardware. Do not swap PIWithAutoTune in for PICore without
+# reading the notes in RelayTuner.elaborate() first.
+#
 # RelayTuner latency: Category B, not on fast path
  
 from amaranth import *
@@ -112,91 +130,203 @@ class PICore(Elaboratable):
         self.gain_w    = gain_w
         self.gain_frac = gain_frac
         self.acc_w     = acc_w
- 
+
         # --- input ports ---
         self.error_in         = Signal(signed(err_w))
         self.error_valid      = Signal()
         self.kp               = Signal(signed(gain_w))
         self.ki               = Signal(signed(gain_w))
         self.lock_enable      = Signal()
+        # hold_enable freezes the whole controller: the output stops
+        # updating and the integrator stops accumulating.
         self.hold_enable      = Signal()
+        # integrator_hold freezes ONLY the integrator. The proportional
+        # path keeps running and the output keeps updating. This is what
+        # a supervisor wants while it injects a deliberate perturbation
+        # (relay tuning, a probe step): the integral state must not
+        # absorb the perturbation, but the servo must stay live.
+        self.integrator_hold  = Signal()
         self.integrator_reset = Signal()
         self.integrator_load  = Signal()
+        # load_value is in OUTPUT (DAC code) units, not raw accumulator
+        # units: loading N makes the controller output N when the error
+        # is zero. The accumulator scaling is an internal detail.
         self.load_value       = Signal(signed(acc_w))
         self.out_min          = Signal(signed(out_w))
         self.out_max          = Signal(signed(out_w))
         self.out_safe         = Signal(signed(out_w))
- 
+        # Leaky-integrator coefficient (packet 11.4 FAST_INT_LEAK).
+        # 0 disables the leak entirely. Otherwise the integrator decays
+        # by 2^-int_leak_shift of its own value on every update, which
+        # is what the CTL200 AC modulation input needs: that path cannot
+        # carry true DC authority, so a pure accumulator would wind up
+        # against an actuator that physically cannot respond.
+        self.int_leak_shift   = Signal(5)
+
         # --- output ports ---
         self.control_out   = Signal(signed(out_w))
         self.control_valid = Signal()
         self.sat_hi        = Signal()
         self.sat_lo        = Signal()
- 
+
     def elaborate(self, platform):
         m = Module()
- 
+
+        # ===================================================================
+        # AUDIT FIX (S1-2) -- the most serious defect found in the audit.
+        # ===================================================================
+        # The previous version accumulated an ALREADY-TRUNCATED integral
+        # increment:
+        #
+        #     i_scaled  = (error * ki) >> gain_frac     # floor division
+        #     int_next  = integrator + i_scaled
+        #
+        # An arithmetic right shift is floor division, so it is asymmetric
+        # about zero. For |error * ki| < 2^gain_frac this gives exactly 0
+        # for a positive error and exactly -1 for a negative error, which
+        # produced two separate failures, both reproduced in simulation:
+        #
+        #   * DEAD ZONE: constant error +100 with ki=128 gave
+        #     100*128 = 12800, and 12800 >> 14 = 0. The integrator never
+        #     moved. No integral action at all below 2^gain_frac / ki
+        #     counts of error.
+        #
+        #   * RAIL DRIFT: a zero-mean error (+3/-3 alternating, mean
+        #     exactly zero) accumulated -1 every other sample and drove
+        #     the output to the negative rail in ~8000 clocks (64 us at
+        #     125 MHz), where it latched. The servo could not hold a lock
+        #     on any noisy signal centred on zero.
+        #
+        # The fix is the structure both reference sources indicate:
+        # accumulate at FULL precision and shift only when reading the
+        # integrator out. Linien's gateware/logic/pid.py does exactly
+        # this (ki_mult is shifted by 4, not by coeff_width; int_reg
+        # holds 18 fractional bits below the output LSB; int_out is
+        # int_reg >> extra_width). Packet 8.5 asks for the same thing
+        # when it requires a "wide internal accumulator".
+        #
+        # `integrator` now holds the integral term scaled by 2^gain_frac,
+        # so the acc_w=40 bit width finally buys the precision it was
+        # always supposed to buy.
+        # ===================================================================
+
         integrator = Signal(signed(self.acc_w))
- 
+
         mul_w = self.err_w + self.gain_w  # 38 bits
- 
+
         p_term    = Signal(signed(mul_w))
         i_term    = Signal(signed(mul_w))
         p_scaled  = Signal(signed(self.acc_w))
-        i_scaled  = Signal(signed(self.acc_w))
+        int_out   = Signal(signed(self.acc_w))
         candidate = Signal(signed(self.acc_w))
+        int_sum   = Signal(signed(self.acc_w + 1))
         int_next  = Signal(signed(self.acc_w))
- 
+        leak      = Signal(signed(self.acc_w))
+
         sat_hi_comb     = Signal()
         sat_lo_comb     = Signal()
         windup_suppress = Signal()
- 
+
         out_max_ext = Signal(signed(self.acc_w))
         out_min_ext = Signal(signed(self.acc_w))
- 
+
+        # Integrator saturation bounds, in accumulator units. Linien
+        # clamps its integrator register the same way (max_pos_extra /
+        # max_neg_extra). This is a second, independent guard on top of
+        # the conditional integration below: conditional integration
+        # alone leaves the accumulator free to grow whenever the
+        # proportional term happens to keep `candidate` in range.
+        int_max = Signal(signed(self.acc_w))
+        int_min = Signal(signed(self.acc_w))
+
+        # Rounding constant for the fixed-point shifts. Round-to-nearest
+        # instead of floor removes the -0.5 LSB systematic bias that the
+        # truncating shifts introduced on every term.
+        round_half = (1 << (self.gain_frac - 1))
+
         m.d.comb += [
             out_max_ext.eq(self.out_max),
             out_min_ext.eq(self.out_min),
 
+            int_max.eq(self.out_max << self.gain_frac),
+            int_min.eq(self.out_min << self.gain_frac),
+
             # ( Kp * e[n] )
             p_term.eq(self.error_in * self.kp),
 
-            # ( Ki * e[n] )
+            # ( Ki * e[n] ) -- NOT shifted here. This is the value that
+            # gets accumulated, at full precision.
             i_term.eq(self.error_in * self.ki),
 
-            # scale it back to recover the proprer bits
-            p_scaled.eq(p_term >> self.gain_frac),
-            i_scaled.eq(i_term >> self.gain_frac),
+            # Proportional term, scaled back to output units with
+            # round-to-nearest.
+            p_scaled.eq((p_term + round_half) >> self.gain_frac),
 
-            # I[n+1] = I[n] + ( Ki * e[n] )
-            int_next.eq(integrator + i_scaled),
+            # Integrator read-out, scaled back to output units with
+            # round-to-nearest.
+            int_out.eq((integrator + round_half) >> self.gain_frac),
 
-            # u[n] = ( Kp * e[n] ) + I[n]
-            candidate.eq(p_scaled + integrator),
- 
+            # Optional leak toward zero (0 shift = no leak).
+            leak.eq(Mux(self.int_leak_shift == 0,
+                        0,
+                        integrator >> self.int_leak_shift)),
+
+            # I[n+1] = I[n] - leak + Ki*e[n], all at full precision
+            int_sum.eq(integrator - leak + i_term),
+
+            # u[n] = Kp*e[n] + I[n]
+            candidate.eq(p_scaled + int_out),
+
             sat_hi_comb.eq(candidate > out_max_ext),
             sat_lo_comb.eq(candidate < out_min_ext),
 
-            # windup_suppress = Should I stop integrating right now?
-            # Only blocks it if it wants to increase in the same direction
-            # it is at its limit. If it is going in the opposite direction
-            # let it be.
+            # Conditional integration: stop integrating only when the
+            # output is already at a limit AND the new increment would
+            # push it further in the same direction. Motion back toward
+            # the linear region is always allowed.
+            #
+            # This now tests i_term (the true, unrounded increment)
+            # rather than the truncated i_scaled, which used to read as
+            # zero inside the dead zone and released anti-windup when it
+            # should not have.
             windup_suppress.eq(
-                (sat_hi_comb & (i_scaled > 0)) |
-                (sat_lo_comb & (i_scaled < 0))
+                (sat_hi_comb & (i_term > 0)) |
+                (sat_lo_comb & (i_term < 0))
             ),
         ]
- 
+
+        # Hard clamp on the accumulator itself.
+        with m.If(int_sum > int_max):
+            m.d.comb += int_next.eq(int_max)
+        with m.Elif(int_sum < int_min):
+            m.d.comb += int_next.eq(int_min)
+        with m.Else():
+            m.d.comb += int_next.eq(int_sum)
+
+        # Preload path: load_value arrives in output units, so scale it
+        # into accumulator units and clamp it to the same bounds the
+        # running accumulator obeys.
+        load_scaled = Signal(signed(self.acc_w))
+        load_raw    = Signal(signed(self.acc_w + 1))
+        m.d.comb += load_raw.eq(self.load_value << self.gain_frac)
+        with m.If(load_raw > int_max):
+            m.d.comb += load_scaled.eq(int_max)
+        with m.Elif(load_raw < int_min):
+            m.d.comb += load_scaled.eq(int_min)
+        with m.Else():
+            m.d.comb += load_scaled.eq(load_raw)
+
         with m.If(self.integrator_reset): # useful during fault, relock, startup
             m.d.sync += integrator.eq(0)
- 
+
         with m.Elif(self.integrator_load):
-            m.d.sync += integrator.eq(self.load_value)
- 
-        with m.Elif(self.error_valid & self.lock_enable & ~self.hold_enable):
+            m.d.sync += integrator.eq(load_scaled)
+
+        with m.Elif(self.error_valid & self.lock_enable
+                    & ~self.hold_enable & ~self.integrator_hold):
             with m.If(~windup_suppress): # Only integrate if windup_suppress = 0
                 m.d.sync += integrator.eq(int_next)
- 
+
         m.d.sync += self.control_valid.eq(0)
  
         with m.If(self.error_valid & self.lock_enable):
@@ -393,9 +523,22 @@ class RelayTuner(Elaboratable):
         # All intermediate products use wide Signals to avoid overflow.
         # ---------------------------------------------------------------
  
-        # peak shift: accumulate over 2^PEAK_SHIFT samples per half-period
-        PEAK_SHIFT = 8   # 256 samples per half-period measurement window
- 
+        # AUDIT FIX (S2-11.3): the amplitude estimate used to be
+        #     a_est = peak_acc >> PEAK_SHIFT     # PEAK_SHIFT fixed at 8
+        # with a comment claiming "peak_count is constrained to
+        # 2^PEAK_SHIFT samples". Nothing constrained it. peak_count was
+        # accumulated and never read, and a half-period is however many
+        # samples the oscillation actually takes, so dividing by a fixed
+        # 256 produced a meaningless number (off by ~39x for a 10k-sample
+        # half period). peak_acc could also wrap: 32 bits accumulating up
+        # to 2^19 per sample overflows after ~8000 samples.
+        #
+        # Now: divide by the real sample count (nearest power of two, via
+        # the same priority-encoder trick used for Tu below), and
+        # saturate the accumulator instead of wrapping.
+        PEAK_ACC_MAX = (1 << 32) - 1
+
+
         # compute-stage registers
         tu_reg  = Signal(32)
         ku_reg  = Signal(signed(self.gain_w))
@@ -413,23 +556,58 @@ class RelayTuner(Elaboratable):
         # denominator: 103993 * a_est
         # We compute in a registered COMPUTE cycle to avoid timing pressure.
  
-        # a_est = peak_acc >> PEAK_SHIFT  (average |error|, Q0 integer codes)
+        # a_est = peak_acc / peak_count  (average |error|, Q0 integer codes)
+        # Divisor is the real accumulated sample count, rounded down to a
+        # power of two so the division is a barrel shift.
+        peak_count_log2 = Signal(6)
+        with m.If(peak_count[31]):
+            m.d.comb += peak_count_log2.eq(31)
+        for _b in range(30, 0, -1):
+            with m.Elif(peak_count[_b]):
+                m.d.comb += peak_count_log2.eq(_b)
+        with m.Else():
+            m.d.comb += peak_count_log2.eq(0)
+
         a_est = Signal(32)
-        m.d.comb += a_est.eq(peak_acc >> PEAK_SHIFT)
+        m.d.comb += a_est.eq(peak_acc >> peak_count_log2)
+
+        # Saturating |error| accumulate, shared by RELAY_P and RELAY_N.
+        err_abs      = Signal(self.err_w)
+        peak_acc_inc = Signal(33)
+        peak_acc_sat = Signal(32)
+        m.d.comb += [
+            err_abs.eq(Mux(self.error_in[-1], -self.error_in, self.error_in)),
+            peak_acc_inc.eq(peak_acc + err_abs),
+        ]
+        with m.If(peak_acc_inc > PEAK_ACC_MAX):
+            m.d.comb += peak_acc_sat.eq(PEAK_ACC_MAX)
+        with m.Else():
+            m.d.comb += peak_acc_sat.eq(peak_acc_inc)
  
         # Ku numerator = 4 * relay_amp << gain_frac  (scaled by 2^14)
+        # ku_num already carries the factor of 4 and the Q3.14 scaling.
         ku_num = Signal(64)
         m.d.comb += ku_num.eq((relay_amp_sig << (gain_frac + 2)))
- 
-        # Ku_q = ku_num / (pi_approx/4 * a_est)
-        # We approximate: Ku_q = ku_num * 4 / (pi * a_est)
-        #   using pi ~ 355/113 -> 4/pi ~ 452/355 ~ 14366 / (2^13 * pi_approx)
-        # Simplified fixed-point approach:
-        #   Ku_q = (ku_num * 10430) >> (gain_frac + 15)
-        #   where 10430/32768 ≈ 4/pi ≈ 1.2732
+
+        # AUDIT FIX (S2-11.2): this was
+        #     ku_scaled = (ku_num * 10430) >> (gain_frac + 15)
+        # with a comment claiming 10430/32768 ~ 4/pi ~ 1.2732. Two
+        # errors compounded:
+        #   * 10430/32768 = 0.3183 = 1/pi, not 4/pi. The factor of 4 is
+        #     already inside ku_num, so 1/pi is the correct constant and
+        #     the COMMENT was what was wrong there.
+        #   * the shift double-applied the Q3.14 scaling. ku_num is
+        #     already scaled by 2^gain_frac, so shifting by
+        #     gain_frac + 15 removed it again. With relay_amp = 512 this
+        #     produced 652 where the correct pre-division value is
+        #     1.068e7, i.e. Ku came out 2^14 times too small and the
+        #     tuner would have driven kp and ki toward zero.
+        #
+        # Correct: Ku_q * a_est = 4 * d * 2^gain_frac / pi
+        #                       = ku_num * (10430 / 2^15)
         ku_scaled = Signal(64)
         m.d.comb += ku_scaled.eq(
-            (ku_num * 10430) >> (gain_frac + 15)
+            (ku_num * 10430) >> 15
         )
  
         # a_est divides ku_scaled; we do this with a registered shift-divide
@@ -484,8 +662,29 @@ class RelayTuner(Elaboratable):
         with m.Elif(a_est[1]):  m.d.comb += a_est_log2.eq(1)
         with m.Else():          m.d.comb += a_est_log2.eq(0)
  
+        # AUDIT FIX (S2-11.7): `ku_final` is signed(gain_w) and
+        # `ku_scaled >> a_est_log2` was assigned into it with NO
+        # saturation. Once the Ku scaling error above was corrected the
+        # true magnitude is ~2^14 larger, so the quotient routinely
+        # exceeds 2^(gain_w-1)-1 and wrapped NEGATIVE. A negative Kp/Ki
+        # inverts the sign of the feedback and drives the actuator
+        # straight to a rail, which is exactly what happened: the
+        # closed-loop test produced kp=-6753, ki=-2026 and pinned the
+        # output at out_min.
+        #
+        # A relay experiment can only yield a positive ultimate gain, so
+        # clamp to [0, 2^(gain_w-1)-1]. Packet 4.4 is explicit about why
+        # this matters: "If the controller polarity is wrong, the loop
+        # becomes positive feedback and runs away."
+        gain_max = (1 << (self.gain_w - 1)) - 1
+
+        ku_quot  = Signal(64)
         ku_final = Signal(signed(self.gain_w))
-        m.d.comb += ku_final.eq(ku_scaled >> a_est_log2)
+        m.d.comb += ku_quot.eq(ku_scaled >> a_est_log2)
+        with m.If(ku_quot > gain_max):
+            m.d.comb += ku_final.eq(gain_max)
+        with m.Else():
+            m.d.comb += ku_final.eq(ku_quot)
  
         # ---------------------------------------------------------------
         # EMA update helper:
@@ -498,8 +697,13 @@ class RelayTuner(Elaboratable):
             m.d.sync += old_reg.eq(old_reg + (delta >> self.ema_shift))
  
         # Kp_q = 0.45 * Ku_q  ~=  (Ku_q * 7373) >> 14   (0.45 * 2^14 = 7373)
-        kp_new = Signal(signed(self.gain_w))
-        m.d.comb += kp_new.eq((ku_final * 7373) >> gain_frac)
+        kp_wide = Signal(64)
+        kp_new  = Signal(signed(self.gain_w))
+        m.d.comb += kp_wide.eq((ku_final * 7373) >> gain_frac)
+        with m.If(kp_wide > gain_max):
+            m.d.comb += kp_new.eq(gain_max)
+        with m.Else():
+            m.d.comb += kp_new.eq(kp_wide)
  
         # Tu = half_period_sum / half_period_count
         # Approximated as barrel-shift division (same CLZ trick as above)
@@ -564,9 +768,17 @@ class RelayTuner(Elaboratable):
  
         # Wide multiply before shift to avoid losing precision
         ki_wide = Signal(64)
+        ki_quot = Signal(64)
         ki_new  = Signal(signed(self.gain_w))
-        m.d.comb += ki_wide.eq((ku_final * 8847) >> tu_log2)
-        m.d.comb += ki_new.eq(ki_wide >> gain_frac)
+        # Shift by gain_frac FIRST so the Tu division keeps its precision;
+        # the previous order divided by Tu before descaling and threw
+        # away low bits for long oscillation periods.
+        m.d.comb += ki_wide.eq((ku_final * 8847) >> gain_frac)
+        m.d.comb += ki_quot.eq(ki_wide >> tu_log2)
+        with m.If(ki_quot > gain_max):
+            m.d.comb += ki_new.eq(gain_max)
+        with m.Else():
+            m.d.comb += ki_new.eq(ki_quot)
  
         # ---------------------------------------------------------------
         # State machine
@@ -609,11 +821,8 @@ class RelayTuner(Elaboratable):
                     m.next = "IDLE"
  
                 with m.Elif(self.error_valid):
-                    # accumulate |error| for amplitude estimate
-                    with m.If(self.error_in[-1]):   # negative (MSB=1 in 2's comp)
-                        m.d.sync += peak_acc.eq(peak_acc + (-self.error_in))
-                    with m.Else():
-                        m.d.sync += peak_acc.eq(peak_acc + self.error_in)
+                    # accumulate |error| for amplitude estimate (saturating)
+                    m.d.sync += peak_acc.eq(peak_acc_sat)
                     m.d.sync += [
                         peak_count.eq(peak_count + 1),
                         half_period_counter.eq(half_period_counter + 1),
@@ -645,28 +854,38 @@ class RelayTuner(Elaboratable):
                 with m.If(~self.tune_enable):
                     m.next = "IDLE"
  
+                # AUDIT FIX (S2-11.1): the zero-crossing block and the
+                # state transitions below used to be de-indented out of
+                # this `Elif`, at the top level of the state. Two
+                # consequences:
+                #   * the accumulate ran on cycles where error_valid was
+                #     low, and
+                #   * `m.next` was assigned UNCONDITIONALLY, so RELAY_N
+                #     lasted exactly one clock cycle and always left for
+                #     RELAY_P or COMPUTE. The relay never produced a
+                #     square wave; it produced a near-DC positive output
+                #     with single-cycle negative blips, and the whole
+                #     Tu/Ku measurement was meaningless.
+                # The structure now mirrors RELAY_P exactly.
                 with m.Elif(self.error_valid):
-                    with m.If(self.error_in[-1]):
-                        m.d.sync += peak_acc.eq(peak_acc + (-self.error_in))
-                    with m.Else():
-                        m.d.sync += peak_acc.eq(peak_acc + self.error_in)
+                    m.d.sync += peak_acc.eq(peak_acc_sat)
                     m.d.sync += [
                         peak_count.eq(peak_count + 1),
                         half_period_counter.eq(half_period_counter + 1),
                         error_prev.eq(self.error_in),
                     ]
- 
+
                     # zero crossing from - to + signals end of negative half-period
-                with m.If(zero_cross & ~self.error_in[-1]):
-                    m.d.sync += [
-                        half_period_sum.eq(half_period_sum + half_period_counter),
-                        half_period_count.eq(half_period_count + 1),
-                        half_period_counter.eq(0),
-                ]
-                with m.If((half_period_count + 1) >= self.min_half_periods):  # <-- add +1
-                    m.next = "COMPUTE"
-                with m.Else():
-                    m.next = "RELAY_P"
+                    with m.If(zero_cross & ~self.error_in[-1]):
+                        m.d.sync += [
+                            half_period_sum.eq(half_period_sum + half_period_counter),
+                            half_period_count.eq(half_period_count + 1),
+                            half_period_counter.eq(0),
+                        ]
+                        with m.If((half_period_count + 1) >= self.min_half_periods):
+                            m.next = "COMPUTE"
+                        with m.Else():
+                            m.next = "RELAY_P"
  
             with m.State("COMPUTE"):
                 # One registered cycle: compute new Ku, apply EMA to kp/ki
@@ -814,8 +1033,25 @@ class PIWithAutoTune(Elaboratable):
             pi.ki.eq(tuner.ki_out),
         ]
  
-        # --- wire tuner -> PICore hold (OR with external hold) ---
-        m.d.comb += pi.hold_enable.eq(self.hold_enable | tuner.hold_request)
+        # AUDIT FIX (S2-11.4): this used to be
+        #     pi.hold_enable.eq(self.hold_enable | tuner.hold_request)
+        # which froze the PICore OUTPUT for the entire relay measurement.
+        # With tune_enable held high the tuner loops through the relay
+        # states continuously, so the servo output was frozen essentially
+        # permanently while background tuning ran. That contradicts both
+        # the class docstring ("the tuner asserts hold_request so the
+        # PICore freezes its integrator") and the claim that the fast
+        # feedback path is not disturbed. Freezing the output IS
+        # disturbing it.
+        #
+        # The tuner's request now drives integrator_hold, which is what
+        # the docstring describes: the relay perturbation cannot corrupt
+        # the integral state, but the proportional path keeps servoing.
+        # Only an explicit external hold still freezes the output.
+        m.d.comb += [
+            pi.hold_enable.eq(self.hold_enable),
+            pi.integrator_hold.eq(tuner.hold_request),
+        ]
  
         # --- wire error to both ---
         m.d.comb += [

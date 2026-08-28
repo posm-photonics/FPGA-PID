@@ -1,5 +1,9 @@
 # Elaborates the Amaranth design to Verilog (build/generate_verilog.py)
-amaranth>=0.5
+# Pinned below 0.6: the RTL uses amaranth.hdl.Memory and Signal(reset=),
+# both deprecated in 0.5 and REMOVED in 0.6. Without an upper bound a
+# fresh install after the next release stops elaborating the whole repo.
+# Migrate to amaranth.lib.memory.Memory and init= before relaxing this.
+amaranth>=0.5,<0.6
 
 # Yosys backend used by amaranth.back.verilog. Only needed as a fallback
 # if you don't already have a system `yosys` >= 0.40 on PATH.

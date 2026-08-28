@@ -453,3 +453,9 @@ vivado*/
 # OS junk
 .DS_Store
 Thumbs.db
+
+# Simulation artifacts (audit: these were being committed)
+*.vcd
+sim/outputs/
+build/out/
+bench_output/
