@@ -70,6 +70,14 @@ class RampScan(Elaboratable):
         self.at_max          = Signal()
         self.cycle_done      = Signal()
         self.ramp_cycle_count = Signal(32)
+        # AUDIT FIX (S1-4): one pulse each time the ramp actually
+        # advances by a step. trace_capture's sample strobe was wired to
+        # cycle_done, which pulses once per COMPLETE sweep, so the trace
+        # captured one point per full scan instead of one per ramp step
+        # (measured: 11 samples in 3.2 ms, trace_ready never asserted,
+        # FSM stuck in WIDE_SCAN). This is the strobe trace_capture's own
+        # docstring asks for: "the same cadence as ramp_scan's updates".
+        self.o_tick          = Signal()
 
     def elaborate(self, platform):
         m = Module()
@@ -80,7 +88,8 @@ class RampScan(Elaboratable):
         # Internal state
         # -------------------------------------------------------
         ramp_value   = Signal(signed(dac_w))
-        direction_up = Signal(reset=1)  # start going up
+        # `reset=` is deprecated in Amaranth 0.5 and removed in 0.6.
+        direction_up = Signal(init=1)   # start going up
         tick_counter = Signal(16)       # clock divider counter
 
         # -------------------------------------------------------
@@ -104,12 +113,46 @@ class RampScan(Elaboratable):
         active_min = Signal(signed(dac_w))
         active_max = Signal(signed(dac_w))
 
+        # AUDIT FIX (S2-4): these used to be
+        #     active_min.eq(zoom_lo[:dac_w])
+        #     active_max.eq(zoom_hi[:dac_w])
+        # so the guard bit that the comment above says exists to "catch
+        # overflow before clamping" was computed and then thrown away by
+        # the slice. With ramp_center = 20000 and ramp_width = 20000,
+        # zoom_hi = 40000 truncated to -25536 and active_max ended up
+        # BELOW active_min. Both direction tests then fired immediately
+        # and the ramp oscillated between two wrong endpoints at the full
+        # tick rate: a large-amplitude square wave on the piezo.
+        #
+        # Clamp to the representable signed range instead of truncating.
+        # Linien achieves the same thing by instantiating its sweep
+        # Limit() one bit wider than the data and sign-extending min/max
+        # into that guard bit.
+        dac_max = (1 << (dac_w - 1)) - 1
+        dac_min = -(1 << (dac_w - 1))
+
+        zoom_lo_clamped = Signal(signed(dac_w))
+        zoom_hi_clamped = Signal(signed(dac_w))
+
+        with m.If(zoom_lo > dac_max):
+            m.d.comb += zoom_lo_clamped.eq(dac_max)
+        with m.Elif(zoom_lo < dac_min):
+            m.d.comb += zoom_lo_clamped.eq(dac_min)
+        with m.Else():
+            m.d.comb += zoom_lo_clamped.eq(zoom_lo)
+
+        with m.If(zoom_hi > dac_max):
+            m.d.comb += zoom_hi_clamped.eq(dac_max)
+        with m.Elif(zoom_hi < dac_min):
+            m.d.comb += zoom_hi_clamped.eq(dac_min)
+        with m.Else():
+            m.d.comb += zoom_hi_clamped.eq(zoom_hi)
+
         with m.If(self.zoom_mode):
             # Zoom Bounds mode
             m.d.comb += [
-                # truncate back to DAC width
-                active_min.eq(zoom_lo[:dac_w]),
-                active_max.eq(zoom_hi[:dac_w]),
+                active_min.eq(zoom_lo_clamped),
+                active_max.eq(zoom_hi_clamped),
             ]
         with m.Else():
             # Full scan mode
@@ -155,9 +198,25 @@ class RampScan(Elaboratable):
         ramp_up_next   = Signal(signed(dac_w + 1))
         ramp_down_next = Signal(signed(dac_w + 1))
 
+        # AUDIT FIX (S2-4, second half): ramp_step = 0 froze the ramp.
+        # ramp_up_next equalled ramp_value, the endpoint test never
+        # fired, cycle_done never pulsed, and lock_fsm.zoom_complete
+        # never asserted, so the FSM hung forever in a scan state (it has
+        # no timeouts). ramp_step defaults to a nonzero value in the
+        # register bank, but nothing stopped software writing 0.
+        #
+        # Clamp to a minimum of 1: the slowest legitimate scan is one
+        # code per tick, and the tick divider is the correct knob for
+        # slowing the scan down further.
+        step_eff = Signal(dac_w)
+        with m.If(self.ramp_step == 0):
+            m.d.comb += step_eff.eq(1)
+        with m.Else():
+            m.d.comb += step_eff.eq(self.ramp_step)
+
         m.d.comb += [
-            ramp_up_next.eq(ramp_value + self.ramp_step),
-            ramp_down_next.eq(ramp_value - self.ramp_step),
+            ramp_up_next.eq(ramp_value + step_eff),
+            ramp_down_next.eq(ramp_value - step_eff),
         ]
 
         # cycle done pulse
@@ -217,6 +276,9 @@ class RampScan(Elaboratable):
         m.d.sync += [
             self.ramp_out.eq(ramp_value),
             self.ramp_valid.eq(self.enable),
+            # Registered so o_tick lines up with the ramp_out sample it
+            # produced, rather than leading it by a cycle.
+            self.o_tick.eq(tick),
         ]
 
         return m

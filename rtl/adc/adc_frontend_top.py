@@ -24,11 +24,18 @@ class ADCFrontendTop(Elaboratable):
 
         self.i_format_mode = Signal()
 
+        # Runtime-programmable stuck-sample threshold, passed through to
+        # the guard (packet 11.2 ADC_GUARD_COUNT). See ADCGuard for why
+        # a compile-time constant was not workable at 125 MSPS.
+        self.i_guard_threshold = Signal(16, init=16)
+
         # Outputs
         self.o_ch0 = Signal(signed(width + 1))
         self.o_ch1 = Signal(signed(width + 1))
         self.o_valid = Signal()
         self.o_fault_flags = Signal(5)
+        self.o_ch0_valid = Signal()
+        self.o_ch1_valid = Signal()
 
     def elaborate(self, platform):
         m = Module()
@@ -54,12 +61,24 @@ class ADCFrontendTop(Elaboratable):
             gd.i_overrange_ch1.eq(self.i_overrange_ch1),
         ]
 
+        # Guard configuration passthrough
+        m.d.comb += gd.i_guard_threshold.eq(self.i_guard_threshold)
+
         # Outputs (post-guard, but values unchanged)
+        #
+        # AUDIT FIX (S4): these used to read gd.i_ch0 / gd.i_ch1, the
+        # guard's own INPUTS. The guard is a passthrough so the value was
+        # identical, but sourcing a top-level output from a block's input
+        # rather than its output means the guard gets bypassed silently
+        # the moment anyone makes it non-passthrough. Read the formatter
+        # directly and say so, instead of reaching through the guard.
         m.d.comb += [
-            self.o_ch0.eq(gd.i_ch0),
-            self.o_ch1.eq(gd.i_ch1),
+            self.o_ch0.eq(fmt.o_ch0),
+            self.o_ch1.eq(fmt.o_ch1),
             self.o_valid.eq(gd.o_valid),
             self.o_fault_flags.eq(gd.o_fault_flags),
+            self.o_ch0_valid.eq(gd.o_ch0_valid),
+            self.o_ch1_valid.eq(gd.o_ch1_valid),
         ]
 
         return m

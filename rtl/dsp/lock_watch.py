@@ -53,13 +53,24 @@ class LockWatch(Elaboratable):
         self.max_error = Signal(signed(self.ERROR_WIDTH))
 
         # DAC monitoring
-        self.fast_output = Signal(self.DAC_WIDTH)
-        self.fast_min = Signal(self.DAC_WIDTH)
-        self.fast_max = Signal(self.DAC_WIDTH)
+        #
+        # AUDIT FIX (S3-6): these were UNSIGNED, while the SAME signals
+        # were reinterpreted with .as_signed() further down for the jump
+        # check. One module treated one signal two different ways.
+        # Driven from the two's-complement DAC path with fast_min = 0 and
+        # fast_max = 65535, the unsigned rail test asserted whenever the
+        # output was 0 or -1 (0xFFFF reads as 65535 unsigned), which is
+        # exactly where a healthy servo sits.
+        #
+        # The controller domain is signed throughout, so these are signed
+        # now and the rail comparison means what it says.
+        self.fast_output = Signal(signed(self.DAC_WIDTH))
+        self.fast_min = Signal(signed(self.DAC_WIDTH))
+        self.fast_max = Signal(signed(self.DAC_WIDTH))
 
-        self.slow_output = Signal(self.DAC_WIDTH)
-        self.slow_min = Signal(self.DAC_WIDTH)
-        self.slow_max = Signal(self.DAC_WIDTH)
+        self.slow_output = Signal(signed(self.DAC_WIDTH))
+        self.slow_min = Signal(signed(self.DAC_WIDTH))
+        self.slow_max = Signal(signed(self.DAC_WIDTH))
 
         # Direct limiter status
         self.fast_saturated = Signal()
@@ -76,8 +87,21 @@ class LockWatch(Elaboratable):
         # How many missing ADC samples are allowed before declaring an ADC fault?
         self.adc_timeout = Signal(self.COUNT_WIDTH)
 
-        # Maximum allowed sudden change in DAC output
+        # Maximum allowed sudden change in DAC output, measured over
+        # jump_window samples rather than between adjacent clock cycles.
         self.jump_limit = Signal(self.DAC_WIDTH)
+
+        # AUDIT FIX (S2-5): the jump detector used to compare the fast
+        # output against its value on the IMMEDIATELY PRECEDING clock.
+        # At 125 MHz a fast servo responding to a real disturbance
+        # routinely moves more than jump_limit codes in one cycle, so the
+        # detector fired constantly and requested spurious relocks.
+        #
+        # "Sudden control jumps" (packet 8.12) means sudden on the
+        # timescale of the lock, not of the sample clock. The reference
+        # sample is now taken every 2^jump_window_shift samples, so the
+        # comparison spans a configurable window.
+        self.jump_window_shift = Signal(5, init=8)   # 256 samples default
 
         # How long can the error stay too large?
         self.error_timeout = Signal(self.COUNT_WIDTH)
@@ -105,9 +129,11 @@ class LockWatch(Elaboratable):
 
         m = Module()
 
-        # Previous DAC storage
-        previous_fast = Signal(self.DAC_WIDTH)
+        # Previous DAC storage (sampled once per jump window)
+        previous_fast = Signal(signed(self.DAC_WIDTH))
         history_valid  = Signal()
+        jump_counter   = Signal(32)
+        jump_tick      = Signal()
         # Counters
         sat_counter = Signal(self.COUNT_WIDTH)
         adc_counter = Signal(self.COUNT_WIDTH)
@@ -120,7 +146,11 @@ class LockWatch(Elaboratable):
         adc_bad = Signal()
         saturation_bad = Signal()
         output_jump = Signal()
-        diff = Signal(signed(17))
+        # AUDIT FIX (S3-6): `diff` used to be declared here AND again a
+        # few lines below, so the first declaration became a dangling,
+        # undriven signal. Declared once now.
+        diff = Signal(signed(self.DAC_WIDTH + 1))
+        abs_diff = Signal(self.DAC_WIDTH + 2)
 
         # Error absolute value
         error_abs = Signal(self.ERROR_WIDTH)
@@ -132,25 +162,28 @@ class LockWatch(Elaboratable):
             m.d.comb += error_abs.eq(self.error_value)
 
         # Threshold checks
-        diff = Signal(signed(17))
-        abs_diff = Signal(17)
-
         m.d.comb += [
             error_bad.eq(error_abs > self.max_error),
-            fast_rail.eq((self.fast_output <= self.fast_min) | (self.fast_output >= self.fast_max)),
-            slow_rail.eq((self.slow_output <= self.slow_min) | (self.slow_output >= self.slow_max)),
+            # Signed comparisons now that the ports are signed.
+            fast_rail.eq((self.fast_output <= self.fast_min)
+                         | (self.fast_output >= self.fast_max)),
+            slow_rail.eq((self.slow_output <= self.slow_min)
+                         | (self.slow_output >= self.slow_max)),
             adc_bad.eq(~self.adc_valid),
             saturation_bad.eq(self.fast_saturated | self.slow_saturated),
         ]
 
+        # Jump detection over a configurable window (see jump_window_shift).
         m.d.comb += [
-            diff.eq(self.fast_output.as_signed() - previous_fast.as_signed()),
+            jump_tick.eq(jump_counter == 0),
+            diff.eq(self.fast_output - previous_fast),
         ]
         with m.If(diff < 0):
             m.d.comb += abs_diff.eq(-diff)
         with m.Else():
             m.d.comb += abs_diff.eq(diff)
-        m.d.comb += output_jump.eq(self.lock_active & history_valid & (abs_diff > self.jump_limit))
+        m.d.comb += output_jump.eq(
+            self.lock_active & history_valid & (abs_diff > self.jump_limit))
 
         # Diagnostics
         m.d.comb += [
@@ -172,13 +205,22 @@ class LockWatch(Elaboratable):
                 adc_counter.eq(0),
                 error_counter.eq(0),
                 history_valid.eq(0),
+                jump_counter.eq(0),
             ]
 
 
         with m.Else():
-            # Store DAC history
-            m.d.sync += previous_fast.eq(self.fast_output)
-            m.d.sync += history_valid.eq(1)
+            # Store DAC history once per jump window rather than every
+            # clock (S2-5). Between refreshes previous_fast holds, so the
+            # comparison spans 2^jump_window_shift samples.
+            with m.If(jump_tick):
+                m.d.sync += [
+                    previous_fast.eq(self.fast_output),
+                    history_valid.eq(1),
+                    jump_counter.eq((1 << self.jump_window_shift) - 1),
+                ]
+            with m.Else():
+                m.d.sync += jump_counter.eq(jump_counter - 1)
             # ADC timeout counter
             with m.If(adc_bad):
                 with m.If(adc_counter < self.adc_timeout):

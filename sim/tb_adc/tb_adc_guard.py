@@ -1,3 +1,12 @@
+import os
+import sys
+
+# AUDIT FIX: this testbench had no sys.path bootstrap and could not
+# be run standalone ("ModuleNotFoundError: No module named 'rtl'"),
+# contradicting README.md's claim that the repo "can be cloned and
+# simulated without hidden local paths".
+sys.path.insert(0, os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..")))
 from amaranth import *
 from amaranth.sim import Simulator
 from amaranth.sim import Tick

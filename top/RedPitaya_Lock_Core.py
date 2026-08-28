@@ -111,6 +111,12 @@ class RedPitayaLockCore(Elaboratable):
         self.o_lock_state = Signal(4)
         self.o_lock_fault = Signal()
         self.o_trace_ready = Signal()
+        # AUDIT FIX (bring-up): a free-running heartbeat bit. The build
+        # script asks the integrator to hand-wire .rst(~adc_rstn) into
+        # red_pitaya_top.v; getting that inversion wrong holds the entire
+        # core in reset, and from the bench that is indistinguishable
+        # from a broken register map. Put this on an LED.
+        self.o_heartbeat = Signal()
 
         # Red Pitaya's native peripheral bus for this module's slot.
         # Wire these directly to the sys_* signals for whichever slot
@@ -151,7 +157,14 @@ class RedPitayaLockCore(Elaboratable):
             core.i_adc_ch0.eq(adc_a_signed),  # ADC_CH0: demodulated MTS error
             core.i_adc_ch1.eq(adc_b_signed),  # ADC_CH1: raw RF monitor
             core.i_adc_valid.eq(1),           # ADC samples are valid every cycle at full rate
-            core.i_adc_overrange_ch0.eq(0),   # TODO: wire from real ADC overrange detect if available
+            # AUDIT NOTE (S3-5): both overrange inputs are tied off, so
+            # ADC overrange -- a fault source packet 10.1 requires -- can
+            # never fire on this board. The Red Pitaya front end does not
+            # expose an overrange flag directly; detecting a sample
+            # sitting at +/-full-scale in the board layer is the usual
+            # substitute. Left tied off deliberately rather than faked,
+            # but this is an open item for hardware bring-up.
+            core.i_adc_overrange_ch0.eq(0),
             core.i_adc_overrange_ch1.eq(0),
             core.i_format_mode.eq(1),         # two's-complement passthrough (already converted above)
             core.i_external_interlock.eq(self.i_external_interlock),
@@ -161,6 +174,11 @@ class RedPitayaLockCore(Elaboratable):
         # ---- DAC: two's complement -> board neg-slope encoding ----
         # LockCoreTop's DACFastFormatter output is 16-bit; take the top
         # 14 bits (drop 2 LSBs) to match the physical DAC width.
+        # core.o_dac_fast / o_dac_slow are unsigned DAC CODES whose
+        # encoding is selected by DAC_CONFIG. This wrapper configures the
+        # core for two's complement (see the register write note below),
+        # so the code IS a signed value and >>2 maps the 16-bit full
+        # scale onto the DAC's 14-bit full scale.
         dac_fast_14 = Signal(signed(14))
         dac_slow_14 = Signal(signed(14))
         m.d.comb += [
@@ -172,11 +190,38 @@ class RedPitayaLockCore(Elaboratable):
             self.o_dac_dat_b.eq(Cat(~dac_slow_14[:13], dac_slow_14[13])),
         ]
 
+        # ---- PDH modulation output: NOT CONNECTED ON THIS BOARD ----
+        #
+        # AUDIT FINDING (S3-9), recorded here rather than left as a
+        # silently dangling port:
+        #
+        # LockCoreTop exposes o_dac_mod, a dedicated EOM modulation
+        # waveform. The Red Pitaya STEMlab 125-14 has exactly two DAC
+        # channels and both are already committed (fast correction and
+        # slow scan/recenter), so there is nowhere for it to go. On this
+        # board the PDH subsystem therefore demodulates a signal that is
+        # never modulated, and synthesis prunes the entire modulation
+        # datapath as unreachable -- anyone probing for the waveform will
+        # find the net does not exist rather than that it is wrong.
+        #
+        # walkthrough.md claims "The modulation DAC signal is routed out
+        # of the top module on its own dedicated port o_dac_mod... This
+        # ensures it doesn't pollute the fast PI loop DAC." That is true
+        # at LockCoreTop and false at the board.
+        #
+        # This is an architecture decision, not a wiring oversight. The
+        # packet's own design (section 5.1) generates the EOM drive from
+        # an external AD9959 DDS rather than the FPGA, so for the v1
+        # architecture an FPGA modulation output should not be needed at
+        # all. Options: drop it, sum it onto one of the two channels, or
+        # move to a board with a third output.
+
         # ---- status ----
         m.d.comb += [
             self.o_lock_state.eq(core.lock_state),
             self.o_lock_fault.eq(core.lock_fault),
             self.o_trace_ready.eq(core.trace_ready),
+            self.o_heartbeat.eq(core.o_heartbeat),
         ]
 
         # ---- register bus: Red Pitaya sys_* <-> project adr/dat_w/... ----

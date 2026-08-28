@@ -138,6 +138,86 @@ ADDR_PDH_LPF_ALPHA      = 0x210  # R/W
 PDH_CTRL_ENABLE         = 0
 
 # ---------------------------------------------------------------------
+# 11.3 Error calculation  (canonical packet addresses)
+# ---------------------------------------------------------------------
+# AUDIT FIX: error_calc's offset and setpoint inputs were HARDWIRED TO
+# ZERO in lock_core_top. Packet 4.3 Eq. 13 defines the error as
+#     e[n] = p * (x[n] - ERROR_OFFSET - ERROR_SETPOINT)
+# and section 4.3 is explicit that e_offset is "a DC/background offset".
+# The MTS demodulated signal has a real electronic offset; without
+# subtracting it the zero crossing is not at zero error, so the servo
+# holds the wrong point. Packet 9.2 step 3 has the PC compute exactly
+# this y-offset from the selected feature.
+ADDR_ERROR_SETPOINT     = 0x080  # R/W signed
+ADDR_ERROR_OFFSET       = 0x084  # R/W signed
+
+# ---------------------------------------------------------------------
+# ADC configuration
+# ---------------------------------------------------------------------
+# NOTE ON ADDRESSES: packet 11.2 places the ADC block at 0x040-0x068.
+# That range is already occupied in this repo by RAMP_TICK_DIV (0x040)
+# through AUTOLOCK_WIDTH_MAX (0x068), because the GUI project relocated
+# the FAST_*/RAMP_*/AUTOLOCK_* registers into 0x020-0x070 instead of
+# using the canonical map (see the status note at the top of
+# UI/Interface/gui/server/parameters.py). The ADC block is parked at
+# 0x0A0 here rather than colliding with it.
+#
+# This is a KNOWN DIVERGENCE from the canonical map and still needs a
+# decision: either move the relocated block back to canonical addresses
+# (which invalidates every existing bitstream and the GUI at once), or
+# amend packet section 11. Do not add further registers in 0x040-0x068.
+ADDR_ADC_CONFIG         = 0x0A0  # R/W bit0 = format mode
+ADDR_ADC_GUARD_COUNT    = 0x0A4  # R/W stuck-sample count before fault candidate
+
+ADC_CFG_FORMAT_MODE     = 0      # 0 = offset binary, 1 = two's complement
+# AUDIT FIX (S3-5): the ADC guard flags reached the sticky FAULT_STATUS
+# word but never reached fault_source, so ADC overrange, a stuck ADC and
+# missing valid did not force a safe output, even though packet 10.1
+# lists all three as fault sources. This bit gates that path, so an
+# operator can disable a noisy source without a rebuild. Default enabled.
+ADC_CFG_FAULT_ENABLE    = 1
+
+# ---------------------------------------------------------------------
+# 11.4 Fast controller (extras, canonical addresses)
+# ---------------------------------------------------------------------
+# Packet 11.4 FAST_INT_LEAK. The CTL200 AC modulation input cannot carry
+# true DC authority (packet 3.4, and the "Important" box in 8.5), so a
+# pure accumulator winds up against an actuator that physically cannot
+# respond. 0 = no leak.
+ADDR_FAST_INT_LEAK      = 0x0CC  # R/W leaky-integrator shift
+
+# ---------------------------------------------------------------------
+# 11.9 Lock check / lock watch  (canonical packet addresses)
+# ---------------------------------------------------------------------
+# AUDIT FIX (S2-5): all five lock-watch thresholds were HARDCODED
+# CONSTANTS in lock_core_top and appeared nowhere in the register map, so
+# retuning the safety watchdog required a resynthesis. The hardcoded
+# saturation_timeout of 100 cycles (800 ns at 125 MHz) was short enough
+# that ordinary lock-acquisition transients tripped it into a fault.
+ADDR_LOCK_CHECK_DELAY   = 0x224  # R/W samples the lock check must hold before passing
+ADDR_LOCK_MAX_ERROR     = 0x22C  # R/W max |error| while locked
+ADDR_LOCK_MAX_SAT_COUNT = 0x234  # R/W saturation duration before fault
+
+# Extensions beyond the canonical block (0x240-0x254 is unused in both
+# the packet and this repo).
+ADDR_LOCK_ADC_TIMEOUT   = 0x240  # R/W missing-valid samples before ADC fault
+ADDR_LOCK_ERROR_TIMEOUT = 0x244  # R/W samples of excess error before relock
+ADDR_LOCK_JUMP_LIMIT    = 0x248  # R/W max |delta| in fast output per jump window
+ADDR_LOCK_JUMP_WINDOW   = 0x24C  # R/W log2 of the jump comparison window
+ADDR_LOCK_STATE_TIMEOUT = 0x250  # R/W cycles before an acquisition state gives up
+ADDR_LOCK_RELOCK_LIMIT  = 0x254  # R/W relock attempts before escalating to fault
+
+# ---------------------------------------------------------------------
+# 11.10 DAC configuration and safety  (canonical packet address)
+# ---------------------------------------------------------------------
+# AUDIT FIX (S3-4): dac_fast_fmt.i_mode was hardcoded to 0 in
+# lock_core_top, with a comment admitting "DAC fast formatter mode
+# selection" was unimplemented. Packet 11.10 defines it as a register.
+ADDR_DAC_CONFIG         = 0x260  # R/W
+DAC_CFG_FAST_OFFSET_BIN = 0      # 0 = two's complement, 1 = offset binary
+DAC_CFG_SLOW_OFFSET_BIN = 1
+
+# ---------------------------------------------------------------------
 # Common widths (defaults; override via module parameters as needed)
 # ---------------------------------------------------------------------
 ADC_W = 16   # ADC sample width

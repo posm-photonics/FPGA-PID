@@ -50,6 +50,7 @@ def main():
         core.o_lock_state,
         core.o_lock_fault,
         core.o_trace_ready,
+        core.o_heartbeat,
         core.sys_addr,
         core.sys_wdata,
         core.sys_sel,

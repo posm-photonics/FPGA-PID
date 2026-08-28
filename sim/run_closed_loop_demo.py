@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from amaranth import *
-from amaranth.sim import Delay, Simulator, Settle, Tick
+from amaranth.sim import Delay, Simulator, Tick
 
 from rtl.bus.register_defs import (
     ADDR_CONTROL,
@@ -51,7 +51,19 @@ from rtl.bus.register_defs import (
     ADDR_SLOW_OUT_SAFE,
     ADDR_SLOW_BIAS,
     ADDR_FAULT_ENABLE,
+    ADDR_LOCK_CHECK_DELAY,
+    ADDR_LOCK_MAX_ERROR,
+    ADDR_LOCK_MAX_SAT_COUNT,
+    ADDR_LOCK_ADC_TIMEOUT,
+    ADDR_LOCK_ERROR_TIMEOUT,
+    ADDR_LOCK_JUMP_LIMIT,
+    ADDR_LOCK_STATE_TIMEOUT,
+    ADDR_ERROR_OFFSET,
+    ADDR_ERROR_SETPOINT,
     CTRL_GLOBAL_ENABLE,
+    CTRL_OUTPUTS_ENABLE,
+    CTRL_TRACE_CAPTURE_ENABLE,
+    CTRL_AUTOLOCK_ENABLE,
     CTRL_LOCK_ENABLE_REQUEST,
     SLOW_CFG_RECENTER_ENABLE,
     SLOW_CFG_TICK_DIV_SHIFT,
@@ -87,8 +99,22 @@ class ClosedLoopRunner:
         yield Tick()
 
     def _configure_dut(self):
-        yield from self._write_reg(self.dut, ADDR_CONTROL,
-                                   (1 << CTRL_GLOBAL_ENABLE) | (1 << CTRL_LOCK_ENABLE_REQUEST))
+        # AUDIT FIX: this used to set only GLOBAL_ENABLE and
+        # LOCK_ENABLE_REQUEST. Three other CONTROL bits are now actually
+        # wired (they were decoded and connected to nothing before, which
+        # is why omitting them appeared harmless):
+        #   OUTPUTS_ENABLE       -- without it the fault gate holds the
+        #                           fast DAC at the safe code forever, so
+        #                           the servo output stays at 0.
+        #   TRACE_CAPTURE_ENABLE -- gates the trace sample strobe.
+        #   AUTOLOCK_ENABLE      -- gates the feature verifier.
+        yield from self._write_reg(
+            self.dut, ADDR_CONTROL,
+            (1 << CTRL_GLOBAL_ENABLE)
+            | (1 << CTRL_OUTPUTS_ENABLE)
+            | (1 << CTRL_LOCK_ENABLE_REQUEST)
+            | (1 << CTRL_TRACE_CAPTURE_ENABLE)
+            | (1 << CTRL_AUTOLOCK_ENABLE))
         yield from self._write_reg(self.dut, ADDR_MODE, 0)
         yield from self._write_reg(self.dut, ADDR_TRACE_CONFIG, 1)
         yield from self._write_reg(self.dut, ADDR_TRACE_LENGTH, 256)
@@ -136,6 +162,23 @@ class ClosedLoopRunner:
         yield from self._write_reg(self.dut, ADDR_SLOW_OUT_SAFE, 0)
         yield from self._write_reg(self.dut, ADDR_FAULT_ENABLE, 0xFFFF)
 
+        # Error-calculation offset and setpoint (packet 11.3). These used
+        # to be hardwired to zero in the RTL with no register behind them.
+        yield from self._write_reg(self.dut, ADDR_ERROR_SETPOINT, 0)
+        yield from self._write_reg(self.dut, ADDR_ERROR_OFFSET, 0)
+
+        # Lock-watch thresholds (packet 11.9). These were hardcoded
+        # constants in lock_core_top; the old saturation timeout of 100
+        # cycles (800 ns) tripped on ordinary acquisition transients.
+        # Scaled here to the demo's short run rather than to real time.
+        yield from self._write_reg(self.dut, ADDR_LOCK_MAX_ERROR, 3000)
+        yield from self._write_reg(self.dut, ADDR_LOCK_CHECK_DELAY, 16)
+        yield from self._write_reg(self.dut, ADDR_LOCK_MAX_SAT_COUNT, 100000)
+        yield from self._write_reg(self.dut, ADDR_LOCK_ADC_TIMEOUT, 1000)
+        yield from self._write_reg(self.dut, ADDR_LOCK_ERROR_TIMEOUT, 100000)
+        yield from self._write_reg(self.dut, ADDR_LOCK_JUMP_LIMIT, 20000)
+        yield from self._write_reg(self.dut, ADDR_LOCK_STATE_TIMEOUT, 2000000)
+
     def _run_simulation(self) -> None:
         def tb(dut: Any):
             yield dut.rst.eq(1)
@@ -171,7 +214,9 @@ class ClosedLoopRunner:
                 # feature; selecting after ten samples aborts the wide scan.
                 yield dut.i_feature_selected.eq(step >= 256)
                 yield Tick()
-                yield Settle()
+                # Settle() is not permitted in a testbench context: an
+                # add_testbench process already observes settled values
+                # after each Tick().
 
                 fast_dac = int((yield dut.o_dac_fast))
                 slow_dac = int((yield dut.o_dac_slow))
@@ -207,22 +252,20 @@ class ClosedLoopRunner:
 
         sim = Simulator(self.dut)
 
-        def clock_process():
-            # Keep the external clock alive for the finite testbench run.
-            # A forever-running process prevents Simulator.run() from
-            # returning after the DUT driver has finished.
-            cycles = self.config.timing.steps + 256
-            for _ in range(cycles):
-                yield self.dut.clk.eq(0)
-                yield Delay(self.config.timing.clock_period_s / 2)
-                yield self.dut.clk.eq(1)
-                yield Delay(self.config.timing.clock_period_s / 2)
+        # AUDIT FIX: this used to hand-drive self.dut.clk from a process.
+        # That only ever "worked" because LockCoreTop drove
+        # ClockSignal("sync") from self.clk through combinational logic,
+        # which is the very construct that made the top level impossible
+        # to simulate (Amaranth raises DriverConflict as soon as anything
+        # else tries to attach a clock). With that fixed, the sync domain
+        # is clocked normally and driving the port by hand would clock
+        # nothing at all.
+        sim.add_clock(self.config.timing.clock_period_s)
 
         def process():
             yield from tb(self.dut)
 
-        sim.add_process(clock_process)
-        sim.add_process(process)
+        sim.add_testbench(process)
         sim.run()
 
     def run(self) -> Dict[str, Any]:

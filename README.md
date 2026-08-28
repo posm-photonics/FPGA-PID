@@ -1,5 +1,11 @@
 # FPGA-PID
-A hardware-agnostic FPGA digital servo engine for laser frequency and intensity stabilization. Built in SystemVerilog, designed for simulation-first development, and structured to be portable across FPGA boards, ADC/DAC hardware, and host interfaces.
+A hardware-agnostic FPGA digital servo engine for laser frequency and intensity stabilization. Written in **Amaranth HDL** (Python) and elaborated to Verilog for synthesis, designed for simulation-first development, and structured to be portable across FPGA boards, ADC/DAC hardware, and host interfaces.
+
+> **Note (2026-08-28):** this README previously described a SystemVerilog
+> project and gave `xvlog`/`xelab`/`xsim` commands. The repository is and
+> has always been Amaranth/Python; none of those commands worked, and the
+> module list below referenced files that do not exist. Corrected during
+> the pre-ship audit.
 
 ---
 
@@ -13,27 +19,53 @@ This project implements the digital control core for locking a laser to a spectr
 
 | Milestone | Description | Done When |
 |-----------|-------------|-----------|
-| **M0** | Repo skeleton, build scripts, simulation tooling | Can run a SystemVerilog simulation and produce a waveform or CSV |
+| **M0** | Repo skeleton, build scripts, simulation tooling | Can run a testbench and produce a waveform or CSV |
 | **M1** | Core PI in simulation: error_calc, IIR filter, PI controller, output limiter | Step input converges; clamp and anti-windup verified; plots generated |
-| **M2** | Scan and hold modes: ramp_scan, mode_mux, lock_fsm | Can switch between passthrough, ramp, hold, and PI lock in simulation |
+| **M2** | Scan and hold modes: ramp_scan, lock_fsm | Can switch between passthrough, ramp, hold, and PI lock in simulation |
 | **M3** | Register interface | All coefficients, limits, modes, and flags exposed through a config bus |
 | **M4** | Dev-board demo | PI loop updates a real GPIO/PWM/DAC output; debug signals observable |
 | **M5** | Real lock integration | Live spectroscopy signal can be scanned and locked under supervision |
 
 ---
 
-## How to Run Simulations
+## How to run simulations
 
-### Vivado xsim (current toolchain)
+Everything is Python. There is no Verilog toolchain in the loop until
+synthesis.
 
-```tcl
-# Compile and run a single testbench, e.g. tb_sat_math
-xvlog --sv rtl/common/sat_math.sv sim/tb_common/tb_sat_math.sv
-xelab tb_sat_math --snapshot tb_sat_math_snap
-xsim tb_sat_math_snap --runall
-Waveforms are written to `outputs/waveforms/`. CSV outputs go to `outputs/csv/`. Use the Python scripts in `sim/tb_system/` to generate plots from CSV data.
+```bash
+pip install -r docs/Requirements.txt
+
+# Run a single testbench
+python3 sim/tb_dsp/tb_pi_controller.py
+
+# Run the full-system integration testbench (scan -> lock -> watch)
+python3 sim/tb_lock_core_top.py
+
+# Run every testbench
+for f in $(find sim -name 'tb_*.py'); do
+    echo "== $f"; python3 "$f" || echo "FAILED: $f";
+done
 ```
+
+## How to build
+
+```bash
+# Elaborate the board wrapper to Verilog
+python3 build/generate_verilog.py
+# -> build/out/red_pitaya_lock_core.v
+
+# Then, with Vivado and a pinned RedPitaya-FPGA checkout:
+vivado -mode batch -source scripts/build_posm_red_pitaya.tcl \
+       -tclargs <path-to-RedPitaya-FPGA>
+```
+
+Read the warnings at the top of `scripts/build_posm_red_pitaya.tcl`
+before wiring the core into `red_pitaya_top.v`. Three of them are
+bring-up traps that cost real debugging time.
+
 ---
+
 ## Fixed-Point Conventions
 
 All arithmetic is signed two's-complement. Key widths:
@@ -44,10 +76,11 @@ All arithmetic is signed two's-complement. Key widths:
 | Error | signed 18-bit | Extra bits for subtraction guard |
 | Filter state | signed 24–32 bit | Saturate only at output |
 | Kp, Ki | signed Q3.14 | Finalize after simulation experience |
-| PI accumulator | signed 40-bit | Clamp to DAC limits at output |
+| PI accumulator | signed 40-bit | Holds Ki*e at FULL precision; shifted only on read-out |
 | DAC command | signed 16-bit | Map to voltage in hardware layer |
 
-See `docs/03_fixed_point_scaling.md` for full binary point documentation.
+See `docs/03_fixed_point_scaling.md` for full binary point documentation,
+including why the accumulator must not be shifted before accumulating.
 
 ---
 
