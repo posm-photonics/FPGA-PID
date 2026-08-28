@@ -121,7 +121,10 @@ class LockCoreTop(Elaboratable):
         # Verilog keeps the same interface for red_pitaya_top.v.
         # ------------------------------------------------------------------
         m.domains.sync = ClockDomain()
-        m.d.comb += ResetSignal("sync").eq(self.rst)
+        m.d.comb += [
+             ClockSignal("sync").eq(self.clk),
+             ResetSignal("sync").eq(self.rst),
+         ]
 
         heartbeat_ctr = Signal(24)
         m.d.sync += heartbeat_ctr.eq(heartbeat_ctr + 1)

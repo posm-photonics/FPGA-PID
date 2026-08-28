@@ -118,10 +118,27 @@ async def release_reset(ctx, dut):
     for _ in range(2):
         await ctx.tick()
 
+async def clock_tick(ctx, dut):
+    """Bit-bang dut.clk directly instead of sim.add_clock("sync").
+
+    lock_core_top.py now comb-drives ClockSignal("sync") from self.clk,
+    so sim.add_clock() on "sync" would double-drive the same signal and
+    raise DriverConflict. Same approach mock_backend.py already uses.
+    """
+    ctx.set(dut.clk, 0)
+    await ctx.delay(CLK / 2)
+    ctx.set(dut.clk, 1)
+    await ctx.delay(CLK / 2)
+
 
 def run(dut, testbench):
     sim = Simulator(dut)
-    sim.add_clock(CLK)
+    async def clocked(ctx):
+        # drive clk in the background for the whole run
+        while True:
+            await clock_tick(ctx, dut)
+
+    sim.add_process(clocked)
     sim.add_testbench(testbench)
     sim.run()
 

@@ -252,15 +252,21 @@ class ClosedLoopRunner:
 
         sim = Simulator(self.dut)
 
-        # AUDIT FIX: this used to hand-drive self.dut.clk from a process.
-        # That only ever "worked" because LockCoreTop drove
-        # ClockSignal("sync") from self.clk through combinational logic,
-        # which is the very construct that made the top level impossible
-        # to simulate (Amaranth raises DriverConflict as soon as anything
-        # else tries to attach a clock). With that fixed, the sync domain
-        # is clocked normally and driving the port by hand would clock
-        # nothing at all.
-        sim.add_clock(self.config.timing.clock_period_s)
+        
+        # LockCoreTop comb-drives ClockSignal("sync") from self.clk, so
+        # the clock has to come in through the clk PORT, not through
+        # sim.add_clock() on the domain (that would double-drive the
+        # same signal). Bit-bang dut.clk directly instead.
+        period = self.config.timing.clock_period_s
+
+        async def clock_process(ctx):
+            while True:
+                ctx.set(self.dut.clk, 0)
+                await ctx.delay(period / 2)
+                ctx.set(self.dut.clk, 1)
+                await ctx.delay(period / 2)
+
+        sim.add_process(clock_process)
 
         def process():
             yield from tb(self.dut)
